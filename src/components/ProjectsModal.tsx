@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { Copy, FolderOpen, Plus, Star, Trash2, X } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Copy, Download, FileUp, FolderOpen, Plus, Star, Trash2, X } from 'lucide-react';
+import { buildFullStudioBackup, restoreFullStudioBackup } from '../storage/backupVault';
 import { CustomTemplatePreset, getDefaultCustomPreset } from '../storage/customPresets';
 import {
   ProjectSummary,
@@ -9,6 +10,7 @@ import {
   saveProjectToStore,
 } from '../storage/projectStore';
 import { DEFAULT_TEMPLATE, QuizProject, createDefaultProject } from '../types/quiz';
+import { saveOrDownloadBlob } from '../utils/nativeDownload';
 
 interface ProjectsModalProps {
   isOpen: boolean;
@@ -28,10 +30,14 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [editingName, setEditingName] = useState(currentProject.name);
   const [defaultPreset, setDefaultPreset] = useState<CustomTemplatePreset | null>(null);
+  const [backupNotice, setBackupNotice] = useState<string>('');
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const restoreInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     setEditingName(currentProject.name);
+    setBackupNotice('');
     void getDefaultCustomPreset().then(setDefaultPreset);
     void saveProjectToStore(currentProject).then(() => {
       void listProjectsFromStore().then(setProjects);
@@ -87,6 +93,52 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
     if (id === currentProject.id || projects.length <= 1) return;
     const next = await deleteProjectFromStore(id);
     setProjects(next);
+  };
+
+  const handleExportFullBackup = async () => {
+    if (isBackingUp) return;
+    setIsBackingUp(true);
+    setBackupNotice('');
+    try {
+      const bundle = await buildFullStudioBackup(currentProject);
+      const json = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const fileName = `shorts-studio-backup-${Date.now()}.json`;
+      const res = await saveOrDownloadBlob(blob, fileName, 'application/json');
+      if (res.ok) {
+        setBackupNotice(
+          `تم حفظ نسخة احتياطية شاملة (${bundle.projects.length} مشاريع و ${bundle.customPresets.length} ستايل).`
+        );
+      } else {
+        setBackupNotice('تعذر حفظ النسخة الاحتياطية على الجهاز.');
+      }
+    } catch {
+      setBackupNotice('حدث خطأ أثناء تجهيز النسخة الاحتياطية.');
+    } finally {
+      setIsBackingUp(false);
+    }
+  };
+
+  const handleRestoreFullBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsBackingUp(true);
+    setBackupNotice('');
+    try {
+      const text = await file.text();
+      const restored = await restoreFullStudioBackup(text);
+      const nextList = await listProjectsFromStore();
+      setProjects(nextList);
+      onSelectProject(restored.activeProject);
+      setBackupNotice(
+        `تمت استعادة ${restored.restoredProjectsCount} مشروع و ${restored.restoredPresetsCount} ستايل بنجاح.`
+      );
+    } catch (err) {
+      setBackupNotice(err instanceof Error ? err.message : 'تعذر قراءة ملف النسخة الاحتياطية.');
+    } finally {
+      setIsBackingUp(false);
+      e.target.value = '';
+    }
   };
 
   return (
@@ -202,6 +254,52 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
                 </div>
               );
             })}
+          </div>
+          {/* Full Studio Backup & Restore Section */}
+          <div className="rounded-xl bg-[var(--surface)] border border-[var(--pline)] p-3 flex flex-col gap-2.5">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[11px] font-bold text-[var(--ptxt)]">
+                نسخة احتياطية شاملة (كل المشاريع والستايلات)
+              </span>
+              <span className="text-[10px] text-[var(--pmuted)] leading-relaxed">
+                احفظ كل أعمالك في ملف واحد قبل تحديث الـ APK أو نقله لجهاز آخر، واستعدها بضغطة واحدة.
+              </span>
+            </div>
+
+            <input
+              ref={restoreInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => void handleRestoreFullBackup(e)}
+              className="hidden"
+            />
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={isBackingUp}
+                onClick={() => void handleExportFullBackup()}
+                className="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[var(--gold)] disabled:opacity-60 text-[11px] font-bold transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-[var(--gold)]" />
+                <span>حفظ كل شيء</span>
+              </button>
+              <button
+                type="button"
+                disabled={isBackingUp}
+                onClick={() => restoreInputRef.current?.click()}
+                className="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[#00B050] disabled:opacity-60 text-[11px] font-bold transition-colors cursor-pointer"
+              >
+                <FileUp className="w-3.5 h-3.5 text-[#00B050]" />
+                <span>استعادة الكل</span>
+              </button>
+            </div>
+
+            {backupNotice && (
+              <div className="px-2.5 py-1.5 rounded-lg bg-[#00B050]/12 border border-[#00B050]/35 text-[11px] text-[#00B050] dark:text-[#6ee7b7]">
+                {backupNotice}
+              </div>
+            )}
           </div>
         </div>
       </div>

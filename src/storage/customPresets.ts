@@ -296,3 +296,35 @@ export function deleteCustomPreset(id: string): CustomTemplatePreset[] {
   void persistPresetsVault(nextList);
   return nextList;
 }
+
+export async function mergeCustomPresetsVault(
+  incomingRaw: unknown[],
+  restoredDefaultStyleId?: string | null
+): Promise<CustomTemplatePreset[]> {
+  const existing = await loadCustomPresetsAsync();
+  const sanitizedIncoming = (Array.isArray(incomingRaw) ? incomingRaw : [])
+    .map(sanitizePresetItem)
+    .filter((x): x is CustomTemplatePreset => x !== null);
+
+  const byId = new Map<string, CustomTemplatePreset>();
+  for (const item of existing) {
+    byId.set(item.id, item);
+  }
+  for (const item of sanitizedIncoming) {
+    byId.set(item.id, item);
+  }
+
+  const merged = Array.from(byId.values()).sort(
+    (a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0)
+  );
+  const saved = await persistPresetsVault(merged);
+
+  if (restoredDefaultStyleId && byId.has(restoredDefaultStyleId)) {
+    setDefaultCustomStyleId(restoredDefaultStyleId);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('shorts-studio-presets-updated'));
+  }
+  return saved;
+}

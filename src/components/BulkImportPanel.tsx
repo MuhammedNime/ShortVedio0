@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
-import { Download, FileUp, Layers, RotateCcw, Sparkles } from 'lucide-react';
+import { Archive, Download, FileUp, Layers, RotateCcw, Sparkles } from 'lucide-react';
+import { buildFullStudioBackup, restoreFullStudioBackup } from '../storage/backupVault';
 import { CHANNEL_SAMPLE_SLIDES, QuestionSlide, QuizProject } from '../types/quiz';
 import { fileToImportText } from '../utils/fileImport';
 import { saveOrDownloadBlob } from '../utils/nativeDownload';
@@ -166,20 +167,37 @@ export const BulkImportPanel: React.FC<BulkImportPanelProps> = ({
     }
   };
 
+  const handleDownloadFullWorkspaceBackup = async () => {
+    try {
+      const bundle = await buildFullStudioBackup(project);
+      const json = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const fileName = `shorts-studio-backup-${Date.now()}.json`;
+      const res = await saveOrDownloadBlob(blob, fileName, 'application/json');
+      if (res.ok) {
+        setFeedback(
+          `تم حفظ النسخة الشاملة (${bundle.projects.length} مشاريع و ${bundle.customPresets.length} ستايل).`
+        );
+      }
+    } catch {
+      setFeedback('تعذر تجهيز النسخة الشاملة.');
+    }
+  };
+
   const handleLoadBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
       const content = await file.text();
-      const parsed = JSON.parse(content) as QuizProject;
-      if (parsed && Array.isArray(parsed.slides) && parsed.template && parsed.timing) {
-        onImportFullProject(parsed);
-        setFeedback('تم استرجاع ملف المشروع بنجاح مع القالب والأصوات.');
-      } else {
-        setFeedback('ملف المشروع غير صالح.');
-      }
-    } catch {
-      setFeedback('تعذر قراءة ملف المشروع.');
+      const restored = await restoreFullStudioBackup(content);
+      onImportFullProject(restored.activeProject);
+      setFeedback(
+        restored.restoredProjectsCount > 1 || restored.restoredPresetsCount > 0
+          ? `تمت استعادة ${restored.restoredProjectsCount} مشروع و ${restored.restoredPresetsCount} ستايل بنجاح.`
+          : 'تم استرجاع ملف المشروع بنجاح مع القالب والأصوات.'
+      );
+    } catch (err) {
+      setFeedback(err instanceof Error ? err.message : 'تعذر قراءة ملف المشروع.');
     }
     e.target.value = '';
   };
@@ -299,9 +317,18 @@ export const BulkImportPanel: React.FC<BulkImportPanelProps> = ({
             className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] text-[var(--ptxt)] border border-[var(--pline)] text-xs font-semibold transition-colors cursor-pointer"
           >
             <FileUp className="w-3.5 h-3.5 text-[#00B050]" />
-            <span>فتح ملف مشروع</span>
+            <span>استعادة مشروع / نسخة شاملة</span>
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={() => void handleDownloadFullWorkspaceBackup()}
+          className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg bg-[#00B050]/12 hover:bg-[#00B050]/20 border border-[#00B050]/40 text-[#00B050] dark:text-[#6ee7b7] text-xs font-bold transition-colors cursor-pointer"
+        >
+          <Archive className="w-3.5 h-3.5" />
+          <span>حفظ نسخة شاملة (كل المشاريع والستايلات)</span>
+        </button>
       </section>
     </div>
   );

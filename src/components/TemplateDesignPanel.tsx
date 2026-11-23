@@ -176,10 +176,15 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
   };
 
   useEffect(() => {
-    void loadCustomPresetsAsync().then((loaded) => {
-      setCustomPresets(loaded);
-    });
+    const reloadPresets = () => {
+      void loadCustomPresetsAsync().then((loaded) => {
+        setCustomPresets(loaded);
+      });
+    };
+    reloadPresets();
+    window.addEventListener('shorts-studio-presets-updated', reloadPresets);
     return () => {
+      window.removeEventListener('shorts-studio-presets-updated', reloadPresets);
       if (noticeTimerRef.current) {
         window.clearTimeout(noticeTimerRef.current);
       }
