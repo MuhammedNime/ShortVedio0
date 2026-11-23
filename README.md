@@ -26,12 +26,15 @@ git push -u origin main
 ```
 
 1. افتح مستودعك على GitHub ثم اذهب إلى تبويب **Actions**.
-2. اختر آخر تشغيل بعنوان **Build Debug APK** (سيبدأ تلقائياً عند كل `push`، أو شغّله يدوياً من **Run workflow**).
-3. بعد انتهاء البناء بنجاح، انزل إلى قسم **Artifacts** وحمّل ملف **`shorts-quiz-studio-debug-apk`** وبداخله **`app-debug.apk`** جاهزاً للتثبيت على أندرويد!
+2. اختر تشغيل **Build Android APK** (سيبدأ تلقائياً عند كل `push`، أو شغّله يدوياً من **Run workflow**).
+3. بعد انتهاء البناء بنجاح، ستجد ملفات الـ APK في مكانين:
+   - قسم **Releases** في المستودع (`releases/latest`) للتحميل المباشر: **`shorts-quiz-studio-release.apk`** و **`shorts-quiz-studio-debug.apk`**.
+   - قسم **Artifacts** داخل صفحة الـ Action بعنوان **`shorts-quiz-studio-apk`**.
 
 ### لماذا يطلب أندرويد حذف التطبيق عند كل تحديث وكيف تجعله يظهر «تحديث» مباشرة؟
-- **في ملفات الـ APK (GitHub Actions / Android Studio):** أندرويد يرفض تحديث أي APK فوق النسخة السابقة إذا تغيّر **مفتاح التوقيع (Keystore)** أو لم يرتفع **`versionCode`**. في بناء `app-debug.apk` التلقائي على GitHub Actions يتم توليد مفتاح تجريبي عشوائي مختلف في كل مرة!
-  - **الحل الدائم للـ APK:** استخدم مفتاح توقيع ثابت واحد (`release.keystore` محفوظ كـ Secret في GitHub باسم `ANDROID_KEYSTORE_BASE64`) وقم بزيادة `versionCode` في كل بناء (مثلاً `github.run_number`)، وبنفس اسم الحزمة (`applicationId`). عندها سيظهر لك زر **«تحديث» (Update)** مباشرة وتبقى جميع مشاريعك وأعمالك محفوظة.
+- **في ملفات الـ APK (GitHub Actions / Android Studio):** أندرويد يرفض تحديث أي APK فوق النسخة السابقة إذا تغيّر **مفتاح التوقيع (Keystore)** أو لم يرتفع **`versionCode`**.
+  - تم ضبط الـ workflow ليرفع `versionCode` تلقائياً في كل بناء (`github.run_number`).
+  - **الحل الدائم للتحديث فوق النسخة السابقة دون حذف:** احفظ ملف توقيع ثابت واحد (`release.keystore`) داخل GitHub Secrets (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`) وبنفس اسم الحزمة (`com.shortsquiz.studio`). عندها سيظهر لك زر **«تحديث» (Update)** مباشرة وتبقى جميع مشاريعك وأعمالك محفوظة.
 - **الحل الأسهل بدون APK متكرر:** ثبّت التطبيق من Chrome عبر زر **تثبيت التطبيق (PWA)** أو افتح رابط الاستوديو المنشور — عندها تصل التحديثات تلقائياً في الخلفية **دون حذف أو إعادة تثبيت**.
 - **النسخ الاحتياطي الشامل:** يمكنك دائماً حفظ كل مشاريعك وستايلاتك في ملف واحد من **المشاريع > حفظ كل شيء** واستعادتها بضغطة واحدة في أي وقت.
 
