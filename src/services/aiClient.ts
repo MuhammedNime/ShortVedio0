@@ -798,7 +798,7 @@ async function fetchAi(path: string, payload: unknown): Promise<Response> {
     );
   }
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 35_000);
+  const timeoutId = setTimeout(() => controller.abort(), 45_000);
   try {
     return await fetch(buildApiUrl(path), {
       method: 'POST',
@@ -810,7 +810,7 @@ async function fetchAi(path: string, payload: unknown): Promise<Response> {
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new AiApiError(
-        'انتهت مهلة الاتصال بخادم الذكاء الاصطناعي (35 ثانية) بسبب الضغط على الخدمة.',
+        'انتهت مهلة الاتصال بخادم الذكاء الاصطناعي (45 ثانية) بسبب الضغط على الخدمة.',
         500,
         false
       );

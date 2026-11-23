@@ -150,22 +150,81 @@ function getTtsQuotaSnapshot(): TtsQuotaSnapshot {
   };
 }
 
-function getConfiguredServerKeys(): string[] {
-  const numbered = Array.from({ length: 10 }, (_, idx) => process.env[`GEMINI_API_KEY_${idx + 1}`] || '');
-  const combined = [
-    process.env.GEMINI_API_KEY || '',
-    process.env.GEMINI_API_KEYS || '',
-    ...numbered,
-  ].join('\n');
+type TextAiProviderId = 'gemini' | 'groq' | 'openrouter' | 'openai' | 'anthropic';
+
+const PLACEHOLDER_KEYS = new Set([
+  'MY_GEMINI_API_KEY',
+  'MY_GROQ_API_KEY',
+  'MY_OPENROUTER_API_KEY',
+  'MY_OPENAI_API_KEY',
+  'MY_ANTHROPIC_API_KEY',
+]);
+
+function collectKeysFromEnvNames(names: string[]): string[] {
+  const combined = names.map((name) => process.env[name] || '').join('\n');
   const seen = new Set<string>();
   const keys: string[] = [];
   for (const part of combined.split(/[\s,;]+/)) {
     const clean = part.trim();
-    if (!clean || clean === 'MY_GEMINI_API_KEY' || seen.has(clean)) continue;
+    if (!clean || PLACEHOLDER_KEYS.has(clean) || seen.has(clean)) continue;
     seen.add(clean);
     keys.push(clean);
   }
   return keys;
+}
+
+function getConfiguredServerKeys(): string[] {
+  const numbered = Array.from({ length: 10 }, (_, idx) => `GEMINI_API_KEY_${idx + 1}`);
+  return collectKeysFromEnvNames(['GEMINI_API_KEY', 'GEMINI_API_KEYS', ...numbered]);
+}
+
+function getConfiguredExternalProviderKeys(
+  provider: Exclude<TextAiProviderId, 'gemini'>
+): string[] {
+  const prefixes =
+    provider === 'anthropic'
+      ? ['ANTHROPIC', 'CLAUDE']
+      : provider === 'openai'
+        ? ['OPENAI', 'CHATGPT']
+        : provider === 'groq'
+          ? ['GROQ']
+          : ['OPENROUTER'];
+
+  const envNames: string[] = [];
+  for (const prefix of prefixes) {
+    envNames.push(`${prefix}_API_KEY`, `${prefix}_API_KEYS`);
+    for (let i = 1; i <= 10; i++) {
+      envNames.push(`${prefix}_API_KEY_${i}`);
+    }
+  }
+  return collectKeysFromEnvNames(envNames);
+}
+
+function getConfiguredProvidersSummary(): Record<TextAiProviderId, number> {
+  return {
+    gemini: getConfiguredServerKeys().length,
+    groq: getConfiguredExternalProviderKeys('groq').length,
+    openrouter: getConfiguredExternalProviderKeys('openrouter').length,
+    openai: getConfiguredExternalProviderKeys('openai').length,
+    anthropic: getConfiguredExternalProviderKeys('anthropic').length,
+  };
+}
+
+function getTextProviderOrder(): TextAiProviderId[] {
+  const defaultOrder: TextAiProviderId[] = ['gemini', 'groq', 'openrouter', 'openai', 'anthropic'];
+  const rawOrder = (process.env.AI_PROVIDER_ORDER || '').trim().toLowerCase();
+  if (!rawOrder) return defaultOrder;
+  const parsed: TextAiProviderId[] = [];
+  for (const token of rawOrder.split(/[\s,;]+/)) {
+    const clean = token.trim() as TextAiProviderId;
+    if (defaultOrder.includes(clean) && !parsed.includes(clean)) {
+      parsed.push(clean);
+    }
+  }
+  for (const p of defaultOrder) {
+    if (!parsed.includes(p)) parsed.push(p);
+  }
+  return parsed;
 }
 
 function createAiClientForKey(apiKey: string): GoogleGenAI {
@@ -281,6 +340,8 @@ async function runServerAiWithRotation<T>(
         raw.includes('API_KEY_INVALID') ||
         raw.includes('API key not valid');
 
+      const isTransient = isTransientServerError(raw);
+
       if (isDaily) {
         if (bucket === 'tts') {
           const usage = getOrCreateTtsUsage(apiKey);
@@ -300,6 +361,10 @@ async function runServerAiWithRotation<T>(
           usage.authInvalid = true;
         }
         serverKeyCooldowns.set(cooldownKey(apiKey), Date.now() + 24 * 60 * 60_000);
+        continue;
+      }
+      if (isTransient && candidates.length > 1) {
+        serverKeyCooldowns.set(cooldownKey(apiKey), Date.now() + 15_000);
         continue;
       }
       throw err;
@@ -339,6 +404,344 @@ async function runWithModelFallback<T>(
   throw lastErr;
 }
 
+function extractJsonPayload(rawText: string): unknown {
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // Fallback: locate the first balanced {...} or [...] block in case a model added surrounding text
+    const startObj = cleaned.indexOf('{');
+    const startArr = cleaned.indexOf('[');
+    let start = -1;
+    if (startObj !== -1 && startArr !== -1) {
+      start = Math.min(startObj, startArr);
+    } else {
+      start = Math.max(startObj, startArr);
+    }
+    if (start === -1) {
+      throw new Error('لم يُرجع النموذج بيانات JSON صالحة.');
+    }
+
+    const openChar = cleaned[start];
+    const closeChar = openChar === '{' ? '}' : ']';
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === openChar) {
+        depth++;
+      } else if (ch === closeChar) {
+        depth--;
+        if (depth === 0) {
+          return JSON.parse(cleaned.slice(start, i + 1));
+        }
+      }
+    }
+    throw new Error('تعذر استخراج JSON مكتمل من استجابة النموذج.');
+  }
+}
+
+async function callOpenAiCompatibleJson(
+  provider: 'groq' | 'openrouter' | 'openai',
+  apiKey: string,
+  model: string,
+  systemInstruction: string,
+  userPrompt: string,
+  useJsonObjectFormat: boolean
+): Promise<string> {
+  const endpoint =
+    provider === 'groq'
+      ? 'https://api.groq.com/openai/v1/chat/completions'
+      : provider === 'openrouter'
+        ? 'https://openrouter.ai/api/v1/chat/completions'
+        : 'https://api.openai.com/v1/chat/completions';
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (provider === 'openrouter') {
+    headers['HTTP-Referer'] = (process.env.APP_URL || '').trim() || 'http://localhost:3000';
+    headers['X-Title'] = 'Shorts Quiz Studio';
+  }
+
+  const bodyPayload: Record<string, unknown> = {
+    model,
+    temperature: 0.7,
+    messages: [
+      { role: 'system', content: systemInstruction },
+      { role: 'user', content: userPrompt },
+    ],
+  };
+  if (useJsonObjectFormat) {
+    bodyPayload.response_format = { type: 'json_object' };
+  }
+
+  const res = await withTimeout(
+    fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+    }),
+    15_000,
+    `${provider} (${model})`
+  );
+
+  const rawBody = await res.text();
+  if (!res.ok) {
+    throw new Error(`${provider} HTTP ${res.status}: ${rawBody.slice(0, 320)}`);
+  }
+
+  const parsed = JSON.parse(rawBody) as {
+    choices?: Array<{ message?: { content?: string | null } }>;
+  };
+  const content = (parsed.choices?.[0]?.message?.content ?? '').trim();
+  if (!content) {
+    throw new Error(`${provider} returned empty content`);
+  }
+  return content;
+}
+
+async function callAnthropicJson(
+  apiKey: string,
+  model: string,
+  systemInstruction: string,
+  userPrompt: string
+): Promise<string> {
+  const res = await withTimeout(
+    fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 2400,
+        temperature: 0.7,
+        system: systemInstruction,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+    }),
+    15_000,
+    `anthropic (${model})`
+  );
+
+  const rawBody = await res.text();
+  if (!res.ok) {
+    throw new Error(`anthropic HTTP ${res.status}: ${rawBody.slice(0, 320)}`);
+  }
+
+  const parsed = JSON.parse(rawBody) as {
+    content?: Array<{ type?: string; text?: string }>;
+  };
+  const content = (parsed.content ?? [])
+    .filter((block) => block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text!)
+    .join('\n')
+    .trim();
+  if (!content) {
+    throw new Error('anthropic returned empty content');
+  }
+  return content;
+}
+
+function classifyProviderErrorCooldownMs(raw: string): number {
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes('401') ||
+    lower.includes('403') ||
+    lower.includes('invalid_api_key') ||
+    lower.includes('authentication_error') ||
+    lower.includes('permission_denied') ||
+    lower.includes('api key not valid')
+  ) {
+    return 24 * 60 * 60_000;
+  }
+  if (
+    lower.includes('insufficient_quota') ||
+    lower.includes('credit balance') ||
+    lower.includes('billing') ||
+    lower.includes('perday') ||
+    lower.includes('per day') ||
+    lower.includes('free_tier_requests')
+  ) {
+    return getNextUtcResetMs();
+  }
+  if (lower.includes('429') || lower.includes('rate_limit') || lower.includes('resource_exhausted')) {
+    return 45_000;
+  }
+  if (
+    lower.includes('503') ||
+    lower.includes('529') ||
+    lower.includes('500') ||
+    lower.includes('unavailable') ||
+    lower.includes('overloaded') ||
+    lower.includes('timed out')
+  ) {
+    return 20_000;
+  }
+  return 10_000;
+}
+
+async function runTextJsonAcrossProviders<T>(params: {
+  geminiTask: (ai: GoogleGenAI, model: string) => Promise<string>;
+  externalSystemInstruction: string;
+  externalUserPrompt: string;
+  parseAndValidate: (payload: unknown) => T;
+}): Promise<{ data: T; provider: TextAiProviderId; model: string }> {
+  const order = getTextProviderOrder();
+  const summary = getConfiguredProvidersSummary();
+  const configuredCount = Object.values(summary).reduce((acc, n) => acc + n, 0);
+
+  if (configuredCount === 0) {
+    throw new Error(
+      'لم يتم العثور على أي مفتاح ذكاء اصطناعي في الخادم. أضف GEMINI_API_KEY أو GROQ_API_KEY (مجاني) أو OPENROUTER_API_KEY أو OPENAI_API_KEY أو ANTHROPIC_API_KEY في Settings > Secrets.'
+    );
+  }
+
+  let lastErr: unknown;
+
+  for (const provider of order) {
+    if (provider === 'gemini') {
+      if (summary.gemini === 0) continue;
+      const geminiModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+      for (const model of geminiModels) {
+        try {
+          const rawText = await runServerAiWithRotation('text', (ai) =>
+            params.geminiTask(ai, model)
+          );
+          const payload = extractJsonPayload(rawText);
+          const data = params.parseAndValidate(payload);
+          return { data, provider: 'gemini', model };
+        } catch (err) {
+          lastErr = err;
+          const raw = err instanceof Error ? err.message : String(err);
+          console.warn(`[AI Multi-Provider] gemini (${model}) failed: ${raw.slice(0, 160)}`);
+        }
+      }
+      continue;
+    }
+
+    const keys = getConfiguredExternalProviderKeys(provider);
+    if (keys.length === 0) continue;
+
+    const now = Date.now();
+    const activeKeys = keys.filter(
+      (k) => (serverKeyCooldowns.get(`${provider}:${k}:text`) ?? 0) <= now
+    );
+    const candidateKeys = activeKeys.length > 0 ? activeKeys : keys;
+
+    const models =
+      provider === 'groq'
+        ? ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant']
+        : provider === 'openrouter'
+          ? (process.env.OPENROUTER_MODELS || '')
+              .split(/[\s,;]+/)
+              .map((m) => m.trim())
+              .filter(Boolean).length > 0
+            ? (process.env.OPENROUTER_MODELS || '')
+                .split(/[\s,;]+/)
+                .map((m) => m.trim())
+                .filter(Boolean)
+            : [
+                'meta-llama/llama-3.3-70b-instruct:free',
+                'google/gemma-3-27b-it:free',
+                'openrouter/free',
+              ]
+          : provider === 'openai'
+            ? ['gpt-4o-mini', 'gpt-4.1-mini']
+            : ['claude-3-5-haiku-latest', 'claude-sonnet-4-20250514'];
+
+    for (const apiKey of candidateKeys) {
+      let keyInvalidOrQuota = false;
+      for (const model of models) {
+        if (keyInvalidOrQuota) break;
+        try {
+          let rawText = '';
+          if (provider === 'anthropic') {
+            rawText = await callAnthropicJson(
+              apiKey,
+              model,
+              params.externalSystemInstruction,
+              params.externalUserPrompt
+            );
+          } else {
+            const useJsonObject = provider === 'groq' || provider === 'openai';
+            try {
+              rawText = await callOpenAiCompatibleJson(
+                provider,
+                apiKey,
+                model,
+                params.externalSystemInstruction,
+                params.externalUserPrompt,
+                useJsonObject
+              );
+            } catch (fmtErr) {
+              const fmtMsg = fmtErr instanceof Error ? fmtErr.message : String(fmtErr);
+              if (useJsonObject && fmtMsg.includes('HTTP 400') && fmtMsg.toLowerCase().includes('json')) {
+                rawText = await callOpenAiCompatibleJson(
+                  provider,
+                  apiKey,
+                  model,
+                  params.externalSystemInstruction,
+                  params.externalUserPrompt,
+                  false
+                );
+              } else {
+                throw fmtErr;
+              }
+            }
+          }
+
+          const payload = extractJsonPayload(rawText);
+          const data = params.parseAndValidate(payload);
+          serverKeyCooldowns.delete(`${provider}:${apiKey}:text`);
+          console.log(`[AI Multi-Provider] Success via ${provider} (${model})`);
+          return { data, provider, model };
+        } catch (err) {
+          lastErr = err;
+          const raw = err instanceof Error ? err.message : String(err);
+          console.warn(`[AI Multi-Provider] ${provider} (${model}) failed: ${raw.slice(0, 160)}`);
+          const cd = classifyProviderErrorCooldownMs(raw);
+          const lower = raw.toLowerCase();
+          if (
+            lower.includes('401') ||
+            lower.includes('403') ||
+            lower.includes('429') ||
+            lower.includes('insufficient_quota') ||
+            lower.includes('credit balance')
+          ) {
+            serverKeyCooldowns.set(`${provider}:${apiKey}:text`, Date.now() + cd);
+            keyInvalidOrQuota = true;
+          }
+        }
+      }
+    }
+  }
+
+  throw lastErr ?? new Error('تعذر توليد النتيجة من جميع مزودي الذكاء الاصطناعي المتاحين حالياً.');
+}
+
 function formatGeminiError(
   err: unknown,
   kind: 'text' | 'tts' = 'text'
@@ -351,25 +754,29 @@ function formatGeminiError(
   const isDailyQuota =
     raw.includes('PerDay') ||
     raw.includes('per day') ||
-    raw.includes('free_tier_requests');
+    raw.includes('free_tier_requests') ||
+    raw.toLowerCase().includes('insufficient_quota') ||
+    raw.toLowerCase().includes('credit balance');
 
   if (
     raw.includes('403') ||
     raw.includes('PERMISSION_DENIED') ||
     raw.includes('API_KEY_INVALID') ||
-    raw.includes('API key not valid')
+    raw.includes('API key not valid') ||
+    raw.toLowerCase().includes('invalid_api_key') ||
+    raw.toLowerCase().includes('authentication_error')
   ) {
     console.warn('[AI API Auth]', raw.slice(0, 200));
     return {
       status: 401,
       message:
-        'تعذر التحقق من صلاحية مفتاح Gemini API (403). يرجى التحقق من المفتاح في لوحة Settings > Secrets.',
+        'تعذر التحقق من صلاحية مفتاح الذكاء الاصطناعي. يرجى مراجعة المفاتيح في Settings > Secrets.',
     };
   }
-  if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
+  if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED') || raw.toLowerCase().includes('insufficient_quota')) {
     console.warn(
       `[AI API Quota:${kind}]`,
-      isDailyQuota ? `Daily free-tier quota exceeded: ${raw.slice(0, 220)}` : `Rate limited: ${raw.slice(0, 220)}`
+      isDailyQuota ? `Daily/quota exceeded: ${raw.slice(0, 220)}` : `Rate limited: ${raw.slice(0, 220)}`
     );
     if (isDailyQuota) {
       return {
@@ -377,8 +784,8 @@ function formatGeminiError(
         quotaExhausted: true,
         message:
           kind === 'tts'
-            ? 'اكتملت الحصة اليومية المجانية لتوليد الصوت (10 طلبات يومياً على الباقة المجانية). يمكنك تفعيل الفوترة لمفتاح API من Settings > Secrets لزيادة الحد اليومي، أو استخدام الأصوات المدمجة / رفع صوتك يدوياً.'
-            : 'اكتملت الحصة اليومية المجانية لتوليد الأسئلة والنصوص على مفتاح API الحالي (429). يمكنك تفعيل الفوترة من Settings > Secrets لزيادة الحصة، أو استخدام الاستيراد السريع / الإدخال اليدوي.',
+            ? 'اكتملت الحصة اليومية المجانية لتوليد الصوت (10 طلبات يومياً لكل مفتاح Gemini مجاني). أضف مفاتيح Gemini إضافية في Settings > Secrets لمضاعفة الحصة، أو استخدم الصوت اليدوي.'
+            : 'اكتملت الحصة المجانية على جميع المفاتيح والمزودين المضافين حالياً (429). أضف مفتاحاً مجانياً إضافياً (Gemini أو Groq أو OpenRouter) في Settings > Secrets أو استخدم الاستيراد اليدوي.',
       };
     }
     return {
@@ -389,6 +796,7 @@ function formatGeminiError(
   }
   if (
     raw.includes('503') ||
+    raw.includes('529') ||
     raw.includes('UNAVAILABLE') ||
     raw.includes('high demand') ||
     raw.includes('overloaded')
@@ -398,7 +806,7 @@ function formatGeminiError(
       status: 500,
       quotaExhausted: false,
       message:
-        'خوادم الذكاء الاصطناعي في Google مزدحمة حالياً (503) ولم تستجب. يمكنك إضافة أسئلتك يدوياً من تبويب «الأسئلة» أو استيراد ملف من تبويب «استيراد» ريثما يخف الضغط.',
+        'خوادم الذكاء الاصطناعي مزدحمة مؤقتاً ولم تستجب (503). يمكنك إضافة مفتاح مجاني بديل مثل GROQ_API_KEY أو OPENROUTER_API_KEY في Secrets للتبديل التلقائي، أو المحاولة بعد ثوانٍ.',
     };
   }
   console.error('[AI API Error]', raw.slice(0, 300));
@@ -465,10 +873,13 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     const keys = getConfiguredServerKeys();
+    const providers = getConfiguredProvidersSummary();
     res.json({
       ok: true,
       hasGeminiKey: keys.length > 0,
       keyCount: keys.length,
+      providers,
+      providerOrder: getTextProviderOrder(),
       ttsQuota: getTtsQuotaSnapshot(),
     });
   });
@@ -565,160 +976,190 @@ ${mathGuidelines}
 - correctIndex: رقم صحيح من 0 إلى 3 يمثل الإجابة الصحيحة
 - explanationText: توضيح قصير جداً للإجابة (أقل من 12 كلمة)`;
 
-      const response = await runWithModelFallback(
-        'text',
-        ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
-        (ai, model) =>
-          ai.models.generateContent({
-            model,
-            contents: promptText,
-            config: {
-              thinkingConfig: {
-                thinkingLevel:
-                  model === 'gemini-3.1-flash-lite'
-                    ? ThinkingLevel.MINIMAL
-                    : ThinkingLevel.LOW,
-              },
-              systemInstruction:
-                'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    badgeText: {
-                      type: Type.STRING,
-                      description: 'عنوان قصير للشارة العلوية مثل: تحدي المعلومات · سؤال 1',
-                    },
-                    question: {
-                      type: Type.STRING,
-                      description: 'نص السؤال باللغة العربية واضح ومختصر',
-                    },
-                    options: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                      description: 'مصفوفة الخيارات أو التلميحات أو طرفي المقارنة',
-                    },
-                    correctIndex: {
-                      type: Type.INTEGER,
-                      description: 'رقم فهرس الإجابة الصحيحة',
-                    },
-                    explanationText: {
-                      type: Type.STRING,
-                      description: 'توضيح مختصر جداً للإجابة الصحيحة',
-                    },
-                  },
-                  required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
-                },
-              },
-            },
-          })
-      );
-
-      const rawText = (response.text ?? '[]').trim();
-      const cleanedJson = rawText
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-      const parsed = JSON.parse(cleanedJson) as Array<{
+      type RawQuizItem = {
         badgeText?: string;
         question?: string;
         options?: string[];
         correctIndex?: number;
         explanationText?: string;
-      }>;
+      };
+
+      const quizSystemInstruction =
+        'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.';
+
+      const externalQuizPrompt = `${promptText}
+
+تنسيق الإرجاع المطلوب (JSON Object فقط بدون أي نص أو شرح إضافي):
+{
+  "slides": [
+    {
+      "badgeText": "...",
+      "question": "...",
+      "options": ["..."],
+      "correctIndex": 0,
+      "explanationText": "..."
+    }
+  ]
+}`;
 
       const minOpts = isTrueFalse || isVersus ? 2 : 4;
-      const normalized = parsed
-        .filter(
-          (item) =>
-            item &&
-            item.question &&
-            Array.isArray(item.options) &&
-            item.options.length >= minOpts
-        )
-        .slice(0, safeCount)
-        .map((item, idx) => {
-          if (isTrueFalse) {
-            const rawIdx = Number(item.correctIndex);
-            const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
-            const o0 = String(item.options?.[0] ?? 'صح').trim() || 'صح';
-            const o1 = String(item.options?.[1] ?? 'خطأ').trim() || 'خطأ';
-            return {
-              id: `ai-slide-${Date.now()}-${idx}`,
-              slideType: 'trueFalse' as const,
-              badgeText: (item.badgeText ?? `صح أم خطأ · ${idx + 1}`).trim(),
-              question: item.question!.trim(),
-              options: [o0, o1, '', ''] as [string, string, string, string],
-              correctIndex: cIdx,
-              explanationText: (item.explanationText ?? '').trim(),
-            };
-          }
 
-          if (isVersus) {
-            const rawIdx = Number(item.correctIndex);
-            const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
-            const o0 = String(item.options?.[0] ?? 'الطرف الأول').trim() || 'الطرف الأول';
-            const o1 = String(item.options?.[1] ?? 'الطرف الثاني').trim() || 'الطرف الثاني';
-            return {
-              id: `ai-slide-${Date.now()}-${idx}`,
-              slideType: 'versus' as const,
-              badgeText: (item.badgeText ?? `مقارنة VS · ${idx + 1}`).trim(),
-              question: item.question!.trim(),
-              options: [o0, o1, '', ''] as [string, string, string, string],
-              correctIndex: cIdx,
-              explanationText: (item.explanationText ?? '').trim(),
-            };
-          }
+      const { data: normalized, provider: usedProvider, model: usedModel } =
+        await runTextJsonAcrossProviders({
+          geminiTask: async (ai, model) => {
+            const response = await ai.models.generateContent({
+              model,
+              contents: promptText,
+              config: {
+                thinkingConfig: {
+                  thinkingLevel:
+                    model === 'gemini-3.1-flash-lite'
+                      ? ThinkingLevel.MINIMAL
+                      : ThinkingLevel.LOW,
+                },
+                systemInstruction: quizSystemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      badgeText: {
+                        type: Type.STRING,
+                        description: 'عنوان قصير للشارة العلوية مثل: تحدي المعلومات · سؤال 1',
+                      },
+                      question: {
+                        type: Type.STRING,
+                        description: 'نص السؤال باللغة العربية واضح ومختصر',
+                      },
+                      options: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: 'مصفوفة الخيارات أو التلميحات أو طرفي المقارنة',
+                      },
+                      correctIndex: {
+                        type: Type.INTEGER,
+                        description: 'رقم فهرس الإجابة الصحيحة',
+                      },
+                      explanationText: {
+                        type: Type.STRING,
+                        description: 'توضيح مختصر جداً للإجابة الصحيحة',
+                      },
+                    },
+                    required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
+                  },
+                },
+              },
+            });
+            return response.text ?? '[]';
+          },
+          externalSystemInstruction: quizSystemInstruction,
+          externalUserPrompt: externalQuizPrompt,
+          parseAndValidate: (payload) => {
+            const rawArray: RawQuizItem[] = Array.isArray(payload)
+              ? (payload as RawQuizItem[])
+              : payload && typeof payload === 'object'
+                ? ((
+                    (payload as { slides?: unknown; questions?: unknown; items?: unknown })
+                      .slides ??
+                    (payload as { questions?: unknown }).questions ??
+                    (payload as { items?: unknown }).items ??
+                    []
+                  ) as RawQuizItem[])
+                : [];
 
-          if (isClues) {
-            const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
-              string,
-              string,
-              string,
-              string
-            ];
-            return {
-              id: `ai-slide-${Date.now()}-${idx}`,
-              slideType: 'clues' as const,
-              badgeText: (item.badgeText ?? `3 تلميحات · ${idx + 1}`).trim(),
-              question: item.question!.trim(),
-              options: opts,
-              correctIndex: 3 as const,
-              explanationText: (item.explanationText ?? '').trim(),
-            };
-          }
+            const items = rawArray
+              .filter(
+                (item) =>
+                  item &&
+                  item.question &&
+                  Array.isArray(item.options) &&
+                  item.options.length >= minOpts
+              )
+              .slice(0, safeCount)
+              .map((item, idx) => {
+                if (isTrueFalse) {
+                  const rawIdx = Number(item.correctIndex);
+                  const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
+                  const o0 = String(item.options?.[0] ?? 'صح').trim() || 'صح';
+                  const o1 = String(item.options?.[1] ?? 'خطأ').trim() || 'خطأ';
+                  return {
+                    id: `ai-slide-${Date.now()}-${idx}`,
+                    slideType: 'trueFalse' as const,
+                    badgeText: (item.badgeText ?? `صح أم خطأ · ${idx + 1}`).trim(),
+                    question: item.question!.trim(),
+                    options: [o0, o1, '', ''] as [string, string, string, string],
+                    correctIndex: cIdx,
+                    explanationText: (item.explanationText ?? '').trim(),
+                  };
+                }
 
-          const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
-            string,
-            string,
-            string,
-            string
-          ];
-          const numIdx = Number(item.correctIndex);
-          const cIdx = Math.max(0, Math.min(3, Math.round(Number.isFinite(numIdx) ? numIdx : 0))) as
-            | 0
-            | 1
-            | 2
-            | 3;
-          return {
-            id: `ai-slide-${Date.now()}-${idx}`,
-            slideType: 'multiple' as const,
-            badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
-            question: item.question!.trim(),
-            options: opts,
-            correctIndex: cIdx,
-            explanationText: (item.explanationText ?? '').trim(),
-          };
+                if (isVersus) {
+                  const rawIdx = Number(item.correctIndex);
+                  const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
+                  const o0 = String(item.options?.[0] ?? 'الطرف الأول').trim() || 'الطرف الأول';
+                  const o1 = String(item.options?.[1] ?? 'الطرف الثاني').trim() || 'الطرف الثاني';
+                  return {
+                    id: `ai-slide-${Date.now()}-${idx}`,
+                    slideType: 'versus' as const,
+                    badgeText: (item.badgeText ?? `مقارنة VS · ${idx + 1}`).trim(),
+                    question: item.question!.trim(),
+                    options: [o0, o1, '', ''] as [string, string, string, string],
+                    correctIndex: cIdx,
+                    explanationText: (item.explanationText ?? '').trim(),
+                  };
+                }
+
+                if (isClues) {
+                  const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
+                    string,
+                    string,
+                    string,
+                    string,
+                  ];
+                  return {
+                    id: `ai-slide-${Date.now()}-${idx}`,
+                    slideType: 'clues' as const,
+                    badgeText: (item.badgeText ?? `3 تلميحات · ${idx + 1}`).trim(),
+                    question: item.question!.trim(),
+                    options: opts,
+                    correctIndex: 3 as const,
+                    explanationText: (item.explanationText ?? '').trim(),
+                  };
+                }
+
+                const opts = item.options!.slice(0, 4).map((o) => String(o).trim()) as [
+                  string,
+                  string,
+                  string,
+                  string,
+                ];
+                const numIdx = Number(item.correctIndex);
+                const cIdx = Math.max(
+                  0,
+                  Math.min(3, Math.round(Number.isFinite(numIdx) ? numIdx : 0))
+                ) as 0 | 1 | 2 | 3;
+                return {
+                  id: `ai-slide-${Date.now()}-${idx}`,
+                  slideType: 'multiple' as const,
+                  badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
+                  question: item.question!.trim(),
+                  options: opts,
+                  correctIndex: cIdx,
+                  explanationText: (item.explanationText ?? '').trim(),
+                };
+              });
+
+            if (items.length === 0) {
+              throw new Error(
+                'لم يتمكن الذكاء الاصطناعي من توليد أسئلة صالحة، حاول صياغة الفكرة بشكل أوضح.'
+              );
+            }
+            return items;
+          },
         });
 
-      if (normalized.length === 0) {
-        res.status(500).json({ error: 'لم يتمكن الذكاء الاصطناعي من توليد أسئلة صالحة، حاول صياغة الفكرة بشكل أوضح.' });
-        return;
-      }
-
-      res.json({ slides: normalized });
+      res.json({ slides: normalized, provider: usedProvider, model: usedModel });
     } catch (err) {
       const formatted = formatGeminiError(err, 'text');
       res.status(formatted.status).json({
@@ -870,11 +1311,12 @@ ${summaryLines}
 - tags: مصفوفة من 8 إلى 12 كلمة مفتاحية قوية للبحث في يوتيوب بدون علامة #
 - pinnedComment: تعليق تفاعلي قصير وممتع جاهز للتثبيت تحت الفيديو يدفع المشاهدين لكتابة نتيجتهم في التعليقات`;
 
-      const response = await runWithModelFallback(
-        'text',
-        ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
-        (ai, model) =>
-          ai.models.generateContent({
+      const kitSystemInstruction =
+        'أنت خبير سيو يوتيوب وصناعة محتوى شورتس المسابقات باللغة العربية. اكتب عناوين عالية النقر بدون حشو، وأوصافاً طبيعية، وتعليقات تفاعلية ذكية.';
+
+      const { data: kitData, provider: usedProvider } = await runTextJsonAcrossProviders({
+        geminiTask: async (ai, model) => {
+          const response = await ai.models.generateContent({
             model,
             contents: promptText,
             config: {
@@ -884,8 +1326,7 @@ ${summaryLines}
                     ? ThinkingLevel.MINIMAL
                     : ThinkingLevel.LOW,
               },
-              systemInstruction:
-                'أنت خبير سيو يوتيوب وصناعة محتوى شورتس المسابقات باللغة العربية. اكتب عناوين عالية النقر بدون حشو، وأوصافاً طبيعية، وتعليقات تفاعلية ذكية.',
+              systemInstruction: kitSystemInstruction,
               responseMimeType: 'application/json',
               responseSchema: {
                 type: Type.OBJECT,
@@ -899,42 +1340,50 @@ ${summaryLines}
                 required: ['title', 'description', 'hashtags', 'tags', 'pinnedComment'],
               },
             },
-          })
-      );
-
-      const rawText = (response.text ?? '{}').trim();
-      const cleaned = rawText
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-      const parsed = JSON.parse(cleaned) as {
-        title?: string;
-        description?: string;
-        hashtags?: string[];
-        tags?: string[];
-        pinnedComment?: string;
-      };
-
-      const hashtags = Array.isArray(parsed.hashtags)
-        ? parsed.hashtags
-            .map((h) => String(h).trim())
-            .filter(Boolean)
-            .map((h) => (h.startsWith('#') ? h : `#${h.replace(/\s+/g, '_')}`))
-            .slice(0, 10)
-        : [];
-      const tags = Array.isArray(parsed.tags)
-        ? parsed.tags
-            .map((t) => String(t).replace(/^#/, '').trim())
-            .filter(Boolean)
-            .slice(0, 15)
-        : [];
+          });
+          return response.text ?? '{}';
+        },
+        externalSystemInstruction: kitSystemInstruction,
+        externalUserPrompt: `${promptText}\n\nأرجع JSON Object صالح فقط بالحقول: title, description, hashtags, tags, pinnedComment.`,
+        parseAndValidate: (payload) => {
+          const parsed = (payload && typeof payload === 'object' ? payload : {}) as {
+            title?: string;
+            description?: string;
+            hashtags?: string[];
+            tags?: string[];
+            pinnedComment?: string;
+          };
+          if (!parsed.title && !parsed.description) {
+            throw new Error('استجابة حزمة النشر غير مكتملة.');
+          }
+          const hashtags = Array.isArray(parsed.hashtags)
+            ? parsed.hashtags
+                .map((h) => String(h).trim())
+                .filter(Boolean)
+                .map((h) => (h.startsWith('#') ? h : `#${h.replace(/\s+/g, '_')}`))
+                .slice(0, 10)
+            : [];
+          const tags = Array.isArray(parsed.tags)
+            ? parsed.tags
+                .map((t) => String(t).replace(/^#/, '').trim())
+                .filter(Boolean)
+                .slice(0, 15)
+            : [];
+          return {
+            title: (parsed.title || 'اختبر ذكاءك في هذا التحدي! #Shorts').trim().slice(0, 100),
+            description: (parsed.description || '').trim(),
+            hashtags,
+            tags,
+            pinnedComment: (
+              parsed.pinnedComment || 'كم إجابة صحيحة جبت؟ اكتب نتيجتك في التعليقات 👇'
+            ).trim(),
+          };
+        },
+      });
 
       res.json({
-        title: (parsed.title || 'اختبر ذكاءك في هذا التحدي! #Shorts').trim().slice(0, 100),
-        description: (parsed.description || '').trim(),
-        hashtags,
-        tags,
-        pinnedComment: (parsed.pinnedComment || 'كم إجابة صحيحة جبت؟ اكتب نتيجتك في التعليقات 👇').trim(),
+        ...kitData,
+        provider: usedProvider,
       });
     } catch (err) {
       const formatted = formatGeminiError(err, 'text');
