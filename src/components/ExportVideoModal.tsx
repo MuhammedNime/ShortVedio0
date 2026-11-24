@@ -33,6 +33,7 @@ import {
   YouTubePlaylistItem,
   YouTubePrivacyStatus,
   YouTubeUploadResult,
+  getYouTubeNativeMode,
   uploadVideoToYouTube,
 } from '../services/youtubeClient';
 import {
@@ -222,11 +223,12 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
           if (!controller.signal.aborted) {
             setIsSaving(false);
             if (saveRes.ok) {
+              const loc = saveRes.savedLocation || 'Movies/ShortsQuizStudio';
               setSaveNotice(
-                `تم حفظ الفيديو تلقائياً في التنزيلات: Downloads/ShortsQuizStudio/${saveRes.fileName || generatedName}`
+                `تم حفظ الفيديو تلقائياً في الاستوديو/الجهاز (${loc}): ${saveRes.fileName || generatedName}`
               );
             } else if (saveRes.error) {
-              setSaveNotice(`تعذر الحفظ التلقائي (${saveRes.error})، جرّب زر مشاركة / حفظ.`);
+              setSaveNotice(`تعذر الحفظ التلقائي (${saveRes.error})، اضغط «مشاركة / رفع لتطبيق YouTube».`);
             }
           }
         }
@@ -298,7 +300,10 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
         );
         if (controller.signal.aborted) return;
         const fileName = `quiz-slide-${i + 1}-${Date.now()}.${res.extension || 'webm'}`;
-        await saveOrDownloadBlob(res.blob, fileName, res.mimeType);
+        const batchSave = await saveOrDownloadBlob(res.blob, fileName, res.mimeType);
+        if (!batchSave.ok) {
+          throw new Error(batchSave.error || `تعذر حفظ الفيديو رقم ${i + 1} على الجهاز`);
+        }
         lastRes = res;
         lastFile = fileName;
         setBatchDoneCount(i + 1);
@@ -310,7 +315,7 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
         setVideoUrl(url);
         setExportedFileName(lastFile);
         setStatus('done');
-        setSaveNotice(`تم تصدير وتنزيل ${totalCount} فيديوهات مستقلة بنجاح.`);
+        setSaveNotice(`تم تصدير وحفظ ${totalCount} فيديوهات مستقلة بنجاح.`);
       }
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
@@ -368,9 +373,10 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
     const res = await saveOrDownloadBlob(result.blob, fileName, result.mimeType);
     setIsSaving(false);
     if (res.ok) {
+      const loc = res.savedLocation || 'Movies/ShortsQuizStudio';
       setSaveNotice(
         res.savedNatively
-          ? `تم حفظ الفيديو في مجلد التنزيلات: Downloads/ShortsQuizStudio/${res.fileName || fileName}`
+          ? `تم حفظ الفيديو في (${loc}): ${res.fileName || fileName}`
           : 'بدأ تنزيل الفيديو على جهازك.'
       );
     } else if (res.error) {
@@ -411,6 +417,8 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
         const res = await saveOrDownloadBlob(blob, thumbName, 'image/jpeg');
         if (res.ok) {
           setSaveNotice('تم حفظ صورة الغلاف (JPG) بدقة الفيديو الكاملة.');
+        } else if (res.error) {
+          setSaveNotice(`تعذر حفظ الغلاف: ${res.error}`);
         }
       }
     } finally {
@@ -419,12 +427,30 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
   };
 
   const canNativeShare = !!result && canShareNatively(fileName, result.mimeType, result.blob);
+  const runningInAndroidApk = isAndroidNativeApp();
+  const ytNativeMode = getYouTubeNativeMode();
 
-  const handleShareVideo = async () => {
+  const handleShareVideo = async (copyMetadataFirst = false) => {
     if (!result || isSaving) return;
+    if (copyMetadataFirst) {
+      try {
+        await navigator.clipboard.writeText(
+          `${publishKit.title}\n\n${publishKit.description}`.trim()
+        );
+        setSaveNotice('تم نسخ العنوان والوصف، اختر تطبيق YouTube من قائمة المشاركة لإكمال النشر.');
+      } catch {
+        // ignore clipboard denial
+      }
+    }
     try {
       setIsSaving(true);
-      await shareBlobNatively(result.blob, fileName, result.mimeType, 'فيديو شورتس الأسئلة');
+      await shareBlobNatively(
+        result.blob,
+        fileName,
+        result.mimeType,
+        publishKit.title || 'فيديو شورتس الأسئلة',
+        publishKit.title || ''
+      );
     } catch {
       // User cancelled share sheet
     } finally {
@@ -800,7 +826,13 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
               </div>
 
               {saveNotice && (
-                <div className="px-3 py-2 rounded-xl bg-[#00B050]/12 border border-[#00B050]/35 text-xs text-[#00B050] dark:text-[#6ee7b7] leading-relaxed break-all">
+                <div
+                  className={`px-3 py-2 rounded-xl border text-xs leading-relaxed break-words ${
+                    saveNotice.startsWith('تعذر')
+                      ? 'bg-rose-500/12 border-rose-500/35 text-rose-600 dark:text-rose-300'
+                      : 'bg-[#00B050]/12 border-[#00B050]/35 text-[#00B050] dark:text-[#6ee7b7]'
+                  }`}
+                >
                   {saveNotice}
                 </div>
               )}
@@ -813,7 +845,7 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
                   className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-[#00B050] hover:bg-[#00c85b] disabled:opacity-60 text-white text-xs sm:text-sm font-bold transition-colors cursor-pointer"
                 >
                   <Download className="w-4 h-4" />
-                  <span>{isSaving ? 'جارٍ الحفظ...' : 'تنزيل الفيديو'}</span>
+                  <span>{isSaving ? 'جارٍ الحفظ...' : runningInAndroidApk ? 'حفظ في المعرض / التنزيلات' : 'تنزيل الفيديو'}</span>
                 </button>
                 <button
                   type="button"
@@ -829,10 +861,19 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
                   <button
                     type="button"
                     disabled={isSaving}
-                    onClick={() => void handleShareVideo()}
-                    className="px-3 py-2.5 rounded-xl bg-[var(--surface)] border border-[#00B050]/40 disabled:opacity-60 text-[#00B050] dark:text-[#6ee7b7] text-xs font-bold transition-colors cursor-pointer"
+                    onClick={() => void handleShareVideo(runningInAndroidApk)}
+                    className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer disabled:opacity-60 ${
+                      runningInAndroidApk
+                        ? 'w-full justify-center bg-rose-600 hover:bg-rose-500 text-white'
+                        : 'bg-[var(--surface)] border border-[#00B050]/40 text-[#00B050] dark:text-[#6ee7b7]'
+                    }`}
                   >
-                    مشاركة / حفظ
+                    {runningInAndroidApk && <Youtube className="w-4 h-4" />}
+                    <span>
+                      {runningInAndroidApk
+                        ? 'مشاركة / رفع عبر تطبيق YouTube الآن (مع نسخ العنوان والوصف)'
+                        : 'مشاركة / حفظ'}
+                    </span>
                   </button>
                 )}
               </div>
@@ -925,16 +966,29 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
             {ytPanelOpen && (
               <div className="flex flex-col gap-3 pt-2 border-t border-[var(--pline)]">
                 {!ytConnected ? (
-                  <div className="flex flex-col gap-2">
-                    <p className="text-[11px] text-[var(--pmuted)] leading-relaxed">
-                      اختر أي حساب Google أو قناة يوتيوب تريد الرفع عليها:
-                    </p>
-                    <GoogleSignInButton
-                      loading={isConnectingYt}
-                      label="تسجيل الدخول بحساب Google / ربط قناة"
-                      onClick={() => void onConnectYouTube()}
-                    />
-                  </div>
+                  ytNativeMode === 'standalone-apk' ? (
+                    <div className="flex flex-col gap-2 p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-[11px] text-[var(--pmuted)] leading-relaxed">
+                      <p className="font-bold text-[var(--ptxt)]">
+                        النشر من تطبيق الأندرويد (APK):
+                      </p>
+                      <p>
+                        تمنع Google نوافذ تسجيل دخول Firebase داخل تطبيقات الأندرويد المحلية (localhost). بعد اكتمال التصدير بالأعلى، يُحفظ الفيديو تلقائياً في المعرض ويمكنك ضغط زر{' '}
+                        <strong className="text-rose-400">«مشاركة / رفع عبر تطبيق YouTube الآن»</strong>{' '}
+                        لإرسال الفيديو مباشرة إلى تطبيق يوتيوب على هاتفك مع نسخ العنوان والوصف تلقائياً.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-[11px] text-[var(--pmuted)] leading-relaxed">
+                        اختر أي حساب Google أو قناة يوتيوب تريد الرفع عليها:
+                      </p>
+                      <GoogleSignInButton
+                        loading={isConnectingYt}
+                        label="تسجيل الدخول بحساب Google / ربط قناة"
+                        onClick={() => void onConnectYouTube()}
+                      />
+                    </div>
+                  )
                 ) : (
                   <div className="flex flex-col gap-3">
                     <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--pline)]">

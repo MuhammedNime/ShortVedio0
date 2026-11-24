@@ -1447,9 +1447,16 @@ ${summaryLines}
       return;
     }
 
+    const rawAppRedirect =
+      typeof req.query.appRedirect === 'string' ? req.query.appRedirect.trim() : '';
+    const appRedirect = rawAppRedirect.startsWith('com.shortsquiz.studio0://youtube-auth')
+      ? rawAppRedirect
+      : '';
+
     const statePayload = Buffer.from(
       JSON.stringify({
         redirectUri,
+        appRedirect: appRedirect || undefined,
         ts: Date.now(),
       }),
       'utf8'
@@ -1473,20 +1480,53 @@ ${summaryLines}
   });
 
   const handleYouTubeOAuthCallback = async (req: express.Request, res: express.Response) => {
+    let appRedirect = '';
+    const stateParam = typeof req.query.state === 'string' ? req.query.state : '';
+    let redirectUri = resolveYouTubeCallbackUrl(req);
+    if (stateParam) {
+      try {
+        const decoded = JSON.parse(Buffer.from(stateParam, 'base64url').toString('utf8')) as {
+          redirectUri?: string;
+          appRedirect?: string;
+        };
+        if (decoded.redirectUri && /^https?:\/\//i.test(decoded.redirectUri)) {
+          redirectUri = decoded.redirectUri;
+        }
+        if (
+          decoded.appRedirect &&
+          decoded.appRedirect.startsWith('com.shortsquiz.studio0://youtube-auth')
+        ) {
+          appRedirect = decoded.appRedirect;
+        }
+      } catch {
+        // keep defaults
+      }
+    }
+
     const renderPopupResult = (payload: Record<string, unknown>, message: string) => {
       const jsonStr = JSON.stringify(payload).replace(/</g, '\\u003c');
+      const deepLinkUrl = appRedirect
+        ? `${appRedirect}#payload=${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}`
+        : '';
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(`<!doctype html>
 <html lang="ar" dir="rtl">
-  <head><meta charset="utf-8"><title>ربط قناة YouTube</title></head>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ربط قناة YouTube</title></head>
   <body style="font-family:system-ui,-apple-system,sans-serif;background:#0c0c0c;color:#f4ead2;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;">
     <div>
       <p style="font-size:16px;font-weight:700;margin-bottom:8px;">${message}</p>
-      <p style="font-size:12px;color:#b8a684;">يمكنك إغلاق هذه النافذة والعودة للتطبيق.</p>
+      ${
+        deepLinkUrl
+          ? `<p style="font-size:12px;color:#b8a684;margin-bottom:16px;">جارٍ إعادتك إلى التطبيق...</p>
+             <a href="${deepLinkUrl}" style="display:inline-block;padding:10px 20px;border-radius:10px;background:#00B050;color:#fff;font-weight:700;text-decoration:none;font-size:13px;">العودة إلى التطبيق الآن</a>`
+          : `<p style="font-size:12px;color:#b8a684;">يمكنك إغلاق هذه النافذة والعودة للتطبيق.</p>`
+      }
     </div>
     <script>
       try {
-        if (window.opener) {
+        if (${JSON.stringify(deepLinkUrl)}) {
+          window.location.replace(${JSON.stringify(deepLinkUrl)});
+        } else if (window.opener) {
           window.opener.postMessage(${jsonStr}, '*');
           setTimeout(function() { window.close(); }, 350);
         }
@@ -1513,21 +1553,6 @@ ${summaryLines}
           'تعذر إتمام الربط.'
         );
         return;
-      }
-
-      let redirectUri = resolveYouTubeCallbackUrl(req);
-      const stateParam = typeof req.query.state === 'string' ? req.query.state : '';
-      if (stateParam) {
-        try {
-          const decoded = JSON.parse(Buffer.from(stateParam, 'base64url').toString('utf8')) as {
-            redirectUri?: string;
-          };
-          if (decoded.redirectUri && /^https?:\/\//i.test(decoded.redirectUri)) {
-            redirectUri = decoded.redirectUri;
-          }
-        } catch {
-          // keep default redirectUri
-        }
       }
 
       const { clientId, clientSecret } = getYouTubeOAuthCredentials();

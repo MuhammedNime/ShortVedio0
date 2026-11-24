@@ -82,6 +82,15 @@ jobs:
             if (!m.includes("android:usesCleartextTraffic")) {
               m = m.replace("<application", "<application\n        android:usesCleartextTraffic=\"true\"");
             }
+            if (!m.includes("android:launchMode")) {
+              m = m.replace("<activity", "<activity\n            android:launchMode=\"singleTask\"");
+            }
+            if (!m.includes("youtube-auth")) {
+              m = m.replace(
+                "</activity>",
+                "            <intent-filter>\n                <action android:name=\"android.intent.action.VIEW\" />\n                <category android:name=\"android.intent.category.DEFAULT\" />\n                <category android:name=\"android.intent.category.BROWSABLE\" />\n                <data android:scheme=\"com.shortsquiz.studio0\" android:host=\"youtube-auth\" />\n            </intent-filter>\n        </activity>"
+              );
+            }
             const perms = [
               "<uses-permission android:name=\"android.permission.RECORD_AUDIO\" />",
               "<uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />",

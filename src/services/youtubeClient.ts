@@ -8,7 +8,7 @@ import {
   signOut,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { isAndroidNativeApp } from '../utils/nativeDownload';
+import { isAndroidNativeApp, openExternalBrowserUrl } from '../utils/nativeDownload';
 
 export const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -64,6 +64,20 @@ export interface YouTubeOAuthStatus {
   isNativeWebView?: boolean;
 }
 
+export type YouTubeNativeMode = 'web-firebase' | 'native-backend-oauth' | 'standalone-apk';
+
+const ENV_MAP = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
+const BUILD_API_BASE = (ENV_MAP.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
+
+function hasRemoteBackend(): boolean {
+  return /^https?:\/\/(?!localhost\b|127\.0\.0\.1\b)/i.test(BUILD_API_BASE);
+}
+
+export function getYouTubeNativeMode(): YouTubeNativeMode {
+  if (!isAndroidNativeApp()) return 'web-firebase';
+  return hasRemoteBackend() ? 'native-backend-oauth' : 'standalone-apk';
+}
+
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const auth = getAuth(app);
 
@@ -72,7 +86,6 @@ function buildGoogleProvider(): GoogleAuthProvider {
   for (const scope of SCOPES) {
     provider.addScope(scope);
   }
-  // Always let the user pick or switch between any Google / YouTube account
   provider.setCustomParameters({ prompt: 'select_account' });
   return provider;
 }
@@ -120,7 +133,9 @@ function ensureAuthStateSubscription(): void {
         notifySessionListeners();
       }
     } else {
-      clearMemorySession();
+      if (getYouTubeNativeMode() === 'web-firebase') {
+        clearMemorySession();
+      }
       notifySessionListeners();
     }
   });
@@ -158,14 +173,96 @@ export async function disconnectYouTubeSession(): Promise<void> {
 }
 
 export async function checkYouTubeOAuthStatus(): Promise<YouTubeOAuthStatus> {
+  const mode = getYouTubeNativeMode();
   const hasConfig = Boolean(firebaseConfig?.apiKey && firebaseConfig?.authDomain);
   return {
-    configured: hasConfig,
+    configured: mode === 'native-backend-oauth' ? true : hasConfig,
     hasClientId: Boolean(firebaseConfig?.oAuthClientId),
     callbackUrl: '',
-    requiresBackendUrl: false,
+    requiresBackendUrl: mode === 'standalone-apk',
     isNativeWebView: isAndroidNativeApp(),
   };
+}
+
+function decodeBase64UrlJson<T>(raw: string): T | null {
+  try {
+    const normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+    const binary = atob(normalized + pad);
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+    const text = new TextDecoder().decode(bytes);
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function connectViaNativeExternalBrowser(): Promise<{
+  accessToken: string;
+  channel: YouTubeChannelInfo | null;
+  email: string | null;
+}> {
+  const res = await fetch(
+    `${BUILD_API_BASE}/api/youtube/auth-url?appRedirect=${encodeURIComponent('com.shortsquiz.studio0://youtube-auth')}`
+  );
+  const data = (await res.json()) as { url?: string; error?: string };
+  if (!res.ok || !data.url) {
+    throw new Error(data.error || 'تعذر تجهيز رابط تسجيل الدخول الخارجي من الخادم.');
+  }
+
+  return new Promise((resolve, reject) => {
+    const w = window as unknown as {
+      __onAndroidYouTubeAuth?: (deepLinkUrl: string) => void;
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      delete w.__onAndroidYouTubeAuth;
+      reject(new Error('انتهت مهلة انتظار العودة من متصفح Google. حاول مرة أخرى.'));
+    }, 180_000);
+
+    w.__onAndroidYouTubeAuth = async (deepLinkUrl: string) => {
+      window.clearTimeout(timeoutId);
+      delete w.__onAndroidYouTubeAuth;
+      try {
+        const hashIdx = deepLinkUrl.indexOf('#');
+        const fragment = hashIdx >= 0 ? deepLinkUrl.slice(hashIdx + 1) : '';
+        const params = new URLSearchParams(fragment);
+        const payloadRaw = params.get('payload') || '';
+        const payload = decodeBase64UrlJson<{
+          type?: string;
+          accessToken?: string;
+          expiresIn?: number;
+          channel?: YouTubeChannelInfo | null;
+          error?: string;
+        }>(payloadRaw);
+
+        if (!payload || payload.type !== 'YOUTUBE_OAUTH_SUCCESS' || !payload.accessToken) {
+          reject(new Error(payload?.error || 'لم تكتمل مصادقة Google بنجاح.'));
+          return;
+        }
+
+        memoryAccessToken = payload.accessToken;
+        memoryTokenExpiresAt = Date.now() + (payload.expiresIn ?? 3400) * 1000;
+        memoryEmail = null;
+        memoryChannel = payload.channel ?? (await fetchYouTubeChannel(payload.accessToken));
+        notifySessionListeners();
+        resolve({
+          accessToken: payload.accessToken,
+          channel: memoryChannel,
+          email: memoryEmail,
+        });
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('تعذر قراءة بيانات المصادقة من الرابط.'));
+      }
+    };
+
+    const opened = openExternalBrowserUrl(data.url!);
+    if (!opened) {
+      window.clearTimeout(timeoutId);
+      delete w.__onAndroidYouTubeAuth;
+      reject(new Error('تعذر فتح متصفح النظام لإتمام تسجيل الدخول.'));
+    }
+  });
 }
 
 function mapFirebaseAuthError(err: unknown): string {
@@ -180,13 +277,10 @@ function mapFirebaseAuthError(err: unknown): string {
   if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
     return 'تم إغلاق نافذة تسجيل الدخول قبل إتمام اختيار الحساب.';
   }
-  if (code === 'auth/unauthorized-domain') {
-    return 'النطاق الحالي غير مصرح به في Firebase Auth. افتح التطبيق من رابط الويب الرسمي لإتمام ربط Google.';
-  }
-  if (code === 'auth/operation-not-supported-in-this-environment') {
+  if (code === 'auth/unauthorized-domain' || code === 'auth/operation-not-supported-in-this-environment') {
     return isAndroidNativeApp()
-      ? 'تسجيل الدخول عبر النافذة المنبثقة غير مدعوم داخل عارض الويب في APK؛ يمكنك نسخ حزمة النشر الجاهزة واستخدام زر «مشاركة / حفظ» لإرسال الفيديو لتطبيق يوتيوب مباشرة.'
-      : 'المتصفح الحالي لا يدعم النوافذ المنبثقة لتسجيل الدخول.';
+      ? 'Google تمنع نوافذ Firebase المنبثقة داخل تطبيقات APK المحلية. صدّر الفيديو (يُحفظ تلقائياً في المعرض) واضغط «إرسال لتطبيق YouTube» للنشر فوراً.'
+      : 'النطاق الحالي غير مصرح به في Firebase Auth أو لا يدعم النوافذ المنبثقة.';
   }
   if (code === 'auth/network-request-failed') {
     return 'تعذر الاتصال بخوادم Google. تحقق من اتصال الإنترنت وأعد المحاولة.';
@@ -202,6 +296,23 @@ export async function connectYouTubeWithPopup(): Promise<{
   channel: YouTubeChannelInfo | null;
   email: string | null;
 }> {
+  const mode = getYouTubeNativeMode();
+
+  if (mode === 'standalone-apk') {
+    throw new Error(
+      'تسجيل الدخول عبر Firebase غير مدعوم داخل تطبيق APK المستقل لأن Google تحظر نوافذ OAuth داخل عارض التطبيقات المحلي (localhost). يمكنك تصدير الفيديو الآن وسيُحفظ في المعرض مع زر «إرسال لتطبيق YouTube» المباشر.'
+    );
+  }
+
+  if (mode === 'native-backend-oauth') {
+    isSigningIn = true;
+    try {
+      return await connectViaNativeExternalBrowser();
+    } finally {
+      isSigningIn = false;
+    }
+  }
+
   ensureAuthStateSubscription();
   isSigningIn = true;
   try {

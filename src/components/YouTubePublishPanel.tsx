@@ -16,6 +16,7 @@ import {
   YouTubeChannelInfo,
   YouTubePlaylistItem,
   YouTubePrivacyStatus,
+  getYouTubeNativeMode,
 } from '../services/youtubeClient';
 import { QuizProject } from '../types/quiz';
 
@@ -194,16 +195,36 @@ export const YouTubePublishPanel: React.FC<YouTubePublishPanelProps> = ({
         </div>
 
         {!ytConnected ? (
-          <div className="flex flex-col gap-2.5">
-            <p className="text-[11px] text-[var(--pmuted)] leading-relaxed">
-              سجّل الدخول بأي حساب Google تريده (حسابك الشخصي أو حساب قناة أخرى). يمكنك اختيار الحساب وتبديل القناة في أي وقت.
-            </p>
-            <GoogleSignInButton
-              loading={isConnectingYt}
-              label="تسجيل الدخول بحساب Google / ربط قناة"
-              onClick={onConnectYouTube}
-            />
-          </div>
+          getYouTubeNativeMode() === 'standalone-apk' ? (
+            <div className="flex flex-col gap-2.5 p-2.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)]">
+              <p className="text-[11px] text-[var(--pmuted)] leading-relaxed">
+                في نسخة الـ APK المستقلة تمنع Google نوافذ تسجيل دخول Firebase (`localhost`). لنشر الفيديو بسهولة: جهّز العنوان والوصف بالأسفل ثم اضغط{' '}
+                <strong className="text-[#00B050]">تصدير الفيديو</strong>{' '}
+                وسيُحفظ في الاستوديو/المعرض مع زر{' '}
+                <strong className="text-rose-400">مشاركة / رفع لتطبيق YouTube</strong>{' '}
+                مباشرة.
+              </p>
+              <button
+                type="button"
+                onClick={onOpenExport}
+                className="flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-[#00B050] hover:bg-[#00c85b] text-white text-xs font-bold transition-colors cursor-pointer"
+              >
+                <Film className="w-4 h-4" />
+                <span>تصدير الفيديو والحفظ في المعرض / النشر</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              <p className="text-[11px] text-[var(--pmuted)] leading-relaxed">
+                سجّل الدخول بأي حساب Google تريده (حسابك الشخصي أو حساب قناة أخرى). يمكنك اختيار الحساب وتبديل القناة في أي وقت.
+              </p>
+              <GoogleSignInButton
+                loading={isConnectingYt}
+                label="تسجيل الدخول بحساب Google / ربط قناة"
+                onClick={onConnectYouTube}
+              />
+            </div>
+          )
         ) : (
           <div className="flex flex-col gap-2.5">
             <div className="flex items-center justify-between gap-2.5 p-2.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)]">
