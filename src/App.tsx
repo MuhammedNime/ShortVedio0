@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Brain,
   Film,
   FolderOpen,
   Layers,
@@ -23,15 +24,17 @@ import { ExportVideoModal } from './components/ExportVideoModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { ProjectsModal } from './components/ProjectsModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { QuestionBankVaultModal } from './components/QuestionBankVaultModal';
 import { ShortsPreviewStage } from './components/ShortsPreviewStage';
 import { SlidesEditorPanel } from './components/SlidesEditorPanel';
 import { TemplateDesignPanel } from './components/TemplateDesignPanel';
-import { YouTubePublishPanel } from './components/YouTubePublishPanel';
+import { GoogleSignInButton, YouTubePublishPanel } from './components/YouTubePublishPanel';
 import { YoutubePublishKit } from './services/aiClient';
 import {
   YouTubeChannelInfo,
   YouTubePlaylistItem,
   YouTubePrivacyStatus,
+  completeApkWebLoginFromBrowser,
   connectYouTubeWithPopup,
   disconnectYouTubeSession,
   fetchMyYouTubePlaylists,
@@ -55,9 +58,86 @@ import {
 } from './types/quiz';
 import { isAppLockEnabled } from './utils/appLock';
 import { setRootBackHandler } from './utils/androidBack';
+import { isAndroidNativeApp } from './utils/nativeDownload';
 
 type StudioTab = 'slides' | 'ai' | 'template' | 'audio' | 'import' | 'youtube';
 type MobileStageMode = 'compact' | 'expanded' | 'collapsed';
+
+const ApkWebLoginBridge: React.FC<{ onStayInWeb: () => void }> = ({ onStayInWeb }) => {
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [returnDeepLink, setReturnDeepLink] = useState('');
+  const [signedEmail, setSignedEmail] = useState<string | null>(null);
+  const [signedChannel, setSignedChannel] = useState<string | null>(null);
+
+  const handleBrowserLogin = async () => {
+    if (loading) return;
+    setLoading(true);
+    setErrorMsg('');
+    try {
+      const res = await completeApkWebLoginFromBrowser();
+      setReturnDeepLink(res.deepLinkUrl);
+      setSignedEmail(res.email);
+      setSignedChannel(res.channel?.title ?? null);
+      window.location.href = res.deepLinkUrl;
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'تعذر إتمام تسجيل الدخول بحساب Google.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--page)] text-[var(--ptxt)] p-4">
+      <div className="w-full max-w-md rounded-2xl bg-[var(--panel)] border border-[var(--pline)] p-6 shadow-2xl flex flex-col gap-4 text-center">
+        <div className="w-12 h-12 mx-auto rounded-2xl bg-[#00B050]/15 border border-[#00B050]/35 flex items-center justify-center">
+          <Youtube className="w-6 h-6 text-rose-500" />
+        </div>
+        <h1 className="text-lg font-extrabold">ربط حساب Google والعودة للتطبيق</h1>
+        <p className="text-xs text-[var(--pmuted)] leading-relaxed">
+          سجّل دخولك عبر المتصفح بحساب Google / YouTube المطلوب، وسيتم إعادتك تلقائياً إلى تطبيق{' '}
+          <strong>استوديو شورتس الأسئلة</strong> مسجلاً الدخول وجاهزاً للرفع.
+        </p>
+
+        {!returnDeepLink ? (
+          <GoogleSignInButton
+            loading={loading}
+            label="تسجيل الدخول بحساب Google والعودة للتطبيق"
+            onClick={() => void handleBrowserLogin()}
+          />
+        ) : (
+          <div className="flex flex-col gap-3 p-3.5 rounded-xl bg-[#00B050]/12 border border-[#00B050]/40">
+            <p className="text-xs font-bold text-[#00B050] dark:text-[#6ee7b7]">
+              تم تسجيل الدخول بنجاح {signedChannel ? `(${signedChannel})` : signedEmail ? `(${signedEmail})` : ''}
+            </p>
+            <a
+              href={returnDeepLink}
+              className="flex items-center justify-center gap-2 w-full py-3 px-4 rounded-xl bg-[#00B050] hover:bg-[#00c85b] text-white text-xs font-extrabold transition-colors"
+            >
+              <span>العودة إلى تطبيق استوديو شورتس الآن</span>
+            </a>
+          </div>
+        )}
+
+        {errorMsg && (
+          <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/35 text-xs text-rose-400">
+            {errorMsg}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onStayInWeb}
+          className="text-xs font-semibold text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
+        >
+          متابعة العمل على نسخة الموقع بدلاً من ذلك
+        </button>
+      </div>
+    </div>
+  );
+};
 
 function buildDefaultPublishKit(proj: QuizProject): YoutubePublishKit {
   const targetSlides = proj.slides;
@@ -93,9 +173,15 @@ export default function App() {
   const [isLocked, setIsLocked] = useState(() => isAppLockEnabled());
   const [isLockModalOpen, setIsLockModalOpen] = useState(false);
   const [isProjectsOpen, setIsProjectsOpen] = useState(false);
+  const [isVaultOpen, setIsVaultOpen] = useState(false);
+  const [vaultRefreshTrigger, setVaultRefreshTrigger] = useState(0);
   const [isToolsMenuOpen, setIsToolsMenuOpen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [showApkWebBridge, setShowApkWebBridge] = useState(() => {
+    if (typeof window === 'undefined' || isAndroidNativeApp()) return false;
+    return new URLSearchParams(window.location.search).get('apk_login') === '1';
+  });
 
   // Shared YouTube Auth + AI Publishing Kit State
   const [publishKit, setPublishKit] = useState<YoutubePublishKit>(() =>
@@ -151,6 +237,11 @@ export default function App() {
         setIsExportOpen(false);
         return true;
       }
+      if (isVaultOpen) {
+        setIsVaultOpen(false);
+        setVaultRefreshTrigger((n) => n + 1);
+        return true;
+      }
       if (isProjectsOpen) {
         setIsProjectsOpen(false);
         return true;
@@ -175,7 +266,7 @@ export default function App() {
       }
       return false;
     });
-  }, [isExportOpen, isProjectsOpen, isLockModalOpen, mobileStageMode, tabHistory, activeTab]);
+  }, [isExportOpen, isVaultOpen, isProjectsOpen, isLockModalOpen, mobileStageMode, tabHistory, activeTab]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -606,6 +697,21 @@ export default function App() {
     { id: 'youtube', label: 'نشر يوتيوب' },
   ];
 
+  if (showApkWebBridge) {
+    return (
+      <ApkWebLoginBridge
+        onStayInWeb={() => {
+          setShowApkWebBridge(false);
+          if (typeof window !== 'undefined') {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('apk_login');
+            window.history.replaceState({}, '', url.toString());
+          }
+        }}
+      />
+    );
+  }
+
   if (isLocked) {
     return <AppLockScreen onUnlock={() => setIsLocked(false)} />;
   }
@@ -709,6 +815,16 @@ export default function App() {
 
               <button
                 type="button"
+                onClick={() => setIsVaultOpen(true)}
+                title="مكتبة الذاكرة الكبرى للأسئلة والمجلدات"
+                className="flex items-center gap-1 h-7 px-2 rounded-lg bg-[#00B050]/12 border border-[#00B050]/45 hover:border-[#00B050] text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer whitespace-nowrap"
+              >
+                <Brain className="w-3.5 h-3.5" />
+                <span>الذاكرة</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setIsProjectsOpen(true)}
                 title="مكتبة المشاريع المحفوظة"
                 className="flex items-center gap-1 h-7 px-2 rounded-lg bg-[var(--surface)] border border-[var(--pline)] hover:border-[#00B050] text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer whitespace-nowrap"
@@ -806,6 +922,9 @@ export default function App() {
             {activeTab === 'ai' && (
               <AiGeneratorPanel
                 voiceName={project.preferredAiVoice ?? 'Kore'}
+                existingQuestions={project.slides.map((s) => s.question)}
+                vaultRefreshTrigger={vaultRefreshTrigger}
+                onOpenLargeVault={() => setIsVaultOpen(true)}
                 onVoiceChange={(voice) =>
                   updateProject((prev) => ({ ...prev, preferredAiVoice: voice }), true)
                 }
@@ -1034,6 +1153,39 @@ export default function App() {
         ytAuthError={ytAuthError}
         onConnectYouTube={handleConnectYouTube}
         onDisconnectYouTube={handleDisconnectYouTube}
+      />
+
+      {/* Large Collapsible Question Bank & Nested Folders Vault */}
+      <QuestionBankVaultModal
+        isOpen={isVaultOpen}
+        onClose={() => {
+          setIsVaultOpen(false);
+          setVaultRefreshTrigger((n) => n + 1);
+        }}
+        voiceName={project.preferredAiVoice ?? 'Kore'}
+        onVoiceChange={(voice) =>
+          updateProject((prev) => ({ ...prev, preferredAiVoice: voice }), true)
+        }
+        onInsertSlides={(newSlides, mode, enableAutoSync, warningMessage, applyMathTheme) => {
+          const targetIdx = mode === 'replace' ? 0 : project.slides.length;
+          updateProject((prev) => {
+            const updatedSlides =
+              mode === 'replace' ? newSlides : [...prev.slides, ...newSlides];
+            return {
+              ...prev,
+              slides: updatedSlides,
+              template: applyMathTheme
+                ? applyChannelThemePreset(prev.template, 'channelMath')
+                : prev.template,
+              timing: enableAutoSync
+                ? { ...prev.timing, autoSyncWithAudio: true }
+                : prev.timing,
+            };
+          }, true);
+          setAiNotice(warningMessage ?? null);
+          setActiveSlideIndex(targetIdx);
+          setActiveTab('slides');
+        }}
       />
 
       {/* Multi-Project Library Modal */}

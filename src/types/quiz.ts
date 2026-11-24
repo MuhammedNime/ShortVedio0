@@ -60,6 +60,88 @@ export type PrizeLadderStyle = 'topStrip' | 'sideColumn';
 export type SlideType = 'multiple' | 'trueFalse' | 'clues' | 'versus';
 export type SlideDifficulty = 'none' | 'easy' | 'medium' | 'hard';
 
+export type QuizCategory =
+  | 'general'
+  | 'discussion'
+  | 'sports'
+  | 'geography'
+  | 'science'
+  | 'history'
+  | 'islamic'
+  | 'technology'
+  | 'literature'
+  | 'math';
+
+export interface QuizCategoryMeta {
+  id: QuizCategory;
+  label: string;
+  emoji: string;
+  promptHint: string;
+}
+
+export const QUIZ_CATEGORIES: QuizCategoryMeta[] = [
+  {
+    id: 'general',
+    label: 'ثقافة عامة',
+    emoji: '💡',
+    promptHint: 'معلومات عامة وثقافة متنوعة ومفاجآت معرفية',
+  },
+  {
+    id: 'discussion',
+    label: 'نقاش وتفاعل',
+    emoji: '💬',
+    promptHint: 'أسئلة نقاشية وتفاعلية للتعليقات ولو خُيّرت ومواقف حياتية',
+  },
+  {
+    id: 'sports',
+    label: 'رياضة',
+    emoji: '⚽',
+    promptHint: 'كرة القدم، البطولات العالمية، الأرقام القياسية، والرياضات المختلفة',
+  },
+  {
+    id: 'geography',
+    label: 'جغرافيا',
+    emoji: '🌍',
+    promptHint: 'الدول، العواصم، الأنهار، الجبال، المعالم، والخرائط',
+  },
+  {
+    id: 'science',
+    label: 'علوم وفضاء',
+    emoji: '🔬',
+    promptHint: 'الفيزياء، الكيمياء، الأحياء، الفضاء والكواكب، وجسم الإنسان',
+  },
+  {
+    id: 'history',
+    label: 'تاريخ',
+    emoji: '🏛️',
+    promptHint: 'الحضارات القديمة، الشخصيات التاريخية، الأحداث الكبرى، والاكتشافات',
+  },
+  {
+    id: 'islamic',
+    label: 'إسلاميات',
+    emoji: '🕌',
+    promptHint: 'السيرة النبوية، الأنبياء، القرآن الكريم، والتاريخ الإسلامي',
+  },
+  {
+    id: 'technology',
+    label: 'تقنية وذكاء',
+    emoji: '💻',
+    promptHint: 'البرمجة، الذكاء الاصطناعي، الاختراعات الحديثة، والشركات التقنية',
+  },
+  {
+    id: 'literature',
+    label: 'لغة وأدب',
+    emoji: '📚',
+    promptHint: 'اللغة العربية، الأمثال، الشعر، المعاني النادرة، والأدب العالمي',
+  },
+  {
+    id: 'math',
+    label: 'رياضيات',
+    emoji: '🧮',
+    promptHint: 'العمليات الحسابية، الجبر، الكسور، الجذور، والهندسة',
+  },
+];
+
 export type OptionsAppearMode = 'stagger' | 'allAtOnce' | 'rowByRow';
 
 export type OptionTextAlign = 'auto' | 'center' | 'right' | 'left';
@@ -146,6 +228,7 @@ export type BrandCornerPosition =
 export interface QuestionSlide {
   id: string;
   slideType?: SlideType;
+  category?: QuizCategory;
   difficulty?: SlideDifficulty;
   badgeText: string;
   question: string;

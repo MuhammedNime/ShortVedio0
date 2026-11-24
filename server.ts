@@ -485,7 +485,7 @@ async function callOpenAiCompatibleJson(
 
   const bodyPayload: Record<string, unknown> = {
     model,
-    temperature: 0.7,
+    temperature: 0.95,
     messages: [
       { role: 'system', content: systemInstruction },
       { role: 'user', content: userPrompt },
@@ -888,15 +888,63 @@ async function startServer() {
     res.json(getTtsQuotaSnapshot());
   });
 
+  const normalizeQuestionForDedup = (text: string): string =>
+    text
+      .replace(/[\u064B-\u065F\u0670]/g, '')
+      .replace(/[أإآ]/g, 'ا')
+      .replace(/ى/g, 'ي')
+      .replace(/ة/g, 'ه')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  const isDuplicateQuestion = (candidate: string, existingNormalized: Set<string>): boolean => {
+    const norm = normalizeQuestionForDedup(candidate);
+    if (!norm) return true;
+    if (existingNormalized.has(norm)) return true;
+
+    const candWords = norm.split(' ').filter((w) => w.length > 2);
+    if (candWords.length < 3) return false;
+    const candSet = new Set(candWords);
+
+    for (const prev of existingNormalized) {
+      const prevWords = prev.split(' ').filter((w) => w.length > 2);
+      if (prevWords.length < 3) continue;
+      let shared = 0;
+      for (const w of candSet) {
+        if (prevWords.includes(w)) shared += 1;
+      }
+      const ratio = shared / Math.max(candSet.size, prevWords.length);
+      if (ratio >= 0.72) return true;
+    }
+    return false;
+  };
+
+  const CREATIVE_VARIETY_ANGLES = [
+    'موقف حياتي شائع يختلف الناس في الحكم عليه',
+    'تحدٍّ غير متوقع أو زاوية نفسية واجتماعية عميقة',
+    'اختيار صعب بين قيمتين أو خيارين متقاربين',
+    'معلومة أو مفارقة نادرة تثير فضول المشاهدين',
+    'سؤال يمس التجارب اليومية والشخصية للجمهور',
+    'زاوية تاريخية أو مستقبلية أو ثقافية مبتكرة',
+    'سؤال ذكي يكسر التوقعات المعتادة ويدفع للتعليق',
+    'مقارنة مثيرة بين أسلوبين في الحياة أو التفكير',
+  ];
+
   // Generate Arabic quiz questions for YouTube Shorts
   app.post('/api/ai/generate-quiz', async (req, res) => {
     try {
-      const { topic, count, difficulty, contentType } = req.body as {
-        topic?: string;
-        count?: number;
-        difficulty?: string;
-        contentType?: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus';
-      };
+      const { topic, count, difficulty, contentType, category, categoryHint, avoidQuestions } =
+        req.body as {
+          topic?: string;
+          count?: number;
+          difficulty?: string;
+          contentType?: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus';
+          category?: string;
+          categoryHint?: string;
+          avoidQuestions?: string[];
+        };
 
       const cleanTopic = (topic ?? '').trim();
       if (!cleanTopic) {
@@ -904,7 +952,20 @@ async function startServer() {
         return;
       }
 
+      const safeCategory = (category ?? 'general').trim() || 'general';
+      const safeCategoryHint = (categoryHint ?? '').trim();
       const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
+      const requestCount = safeCount <= 3 ? Math.min(5, safeCount + 2) : safeCount;
+      const cleanAvoidList = Array.isArray(avoidQuestions)
+        ? avoidQuestions
+            .map((q) => (typeof q === 'string' ? q.trim() : ''))
+            .filter(Boolean)
+            .slice(-45)
+        : [];
+      const avoidNormalizedSet = new Set(
+        cleanAvoidList.map((q) => normalizeQuestionForDedup(q)).filter(Boolean)
+      );
+
       const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
       const isTrueFalse = contentType === 'trueFalse';
       const isClues = contentType === 'clues';
@@ -914,7 +975,18 @@ async function startServer() {
         !isClues &&
         !isVersus &&
         (contentType === 'math' ||
+          safeCategory === 'math' ||
           /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(cleanTopic));
+      const isDiscussion =
+        !isMath &&
+        !isTrueFalse &&
+        !isClues &&
+        (safeCategory === 'discussion' ||
+          /نقاش|جدل|رأي|رأيك|رايك|لو خي|لو خيروك|تفاعل|تعليقات|تفضل|موقف|اجتماعي/i.test(cleanTopic));
+
+      const categoryDirective = safeCategoryHint
+        ? `\nالمجال / التصنيف المطلوب الالتزام به بدقة: ${safeCategoryHint}.`
+        : '';
 
       const mathGuidelines = isMath
         ? `\nملاحظات مهمة لأسئلة الرياضيات:
@@ -923,12 +995,32 @@ async function startServer() {
 - تأكد رياضياً 100% أن الخيار عند correctIndex هو الحل الصحيح الوحيد.`
         : '';
 
+      const discussionGuidelines = isDiscussion
+        ? `\nملاحظات مهمة لأسئلة النقاش والتفاعل في التعليقات:
+- المطلوب أسئلة نقاشية / «لو خُيّرت» / «ما رأيك» تحفّز المشاهدين على النقاش وكتابة اختياراتهم في التعليقات، وتجنب تماماً الأسئلة المستهلكة المكررة (مثل المال أم السعادة أو السفر للماضي أم المستقبل).
+- نوّع الموضوعات بين: العمل، الصداقة، التقنية، العائلة، اتخاذ القرارات، الطموح، العادات اليومية، والمواقف المحيّرة.
+- اجعل الخيارات الأربعة (أو الطرفين في VS) تمثل اختيارات/آراء واضحة ومتقاربة القوة تدفع كل شخص لاختيار موقف والدفاع عنه في التعليقات.
+- اجعل explanationText عبارة قصيرة مشوقة تدعو المشاهد لكتابة رأيه وسببه في التعليقات.`
+        : '';
+
+      const angleHint =
+        CREATIVE_VARIETY_ANGLES[Math.floor(Math.random() * CREATIVE_VARIETY_ANGLES.length)];
+      const varietySeed = Math.floor(10000 + Math.random() * 90000);
+      const avoidBlock =
+        cleanAvoidList.length > 0
+          ? `\n\nتنبيه صارم — ممنوع تكرار أو إعادة صياغة أي من الأسئلة التالية التي طُرحت سابقاً:\n${cleanAvoidList
+              .map((q, i) => `${i + 1}. ${q}`)
+              .join('\n')}\nابتكر أسئلة جديدة ومختلفة كلياً عن القائمة أعلاه.`
+          : '';
+      const diversityDirective = `${categoryDirective}\nزاوية التنويع المطلوبة لهذا الطلب (#${varietySeed}): ${angleHint}.${avoidBlock}`;
+
       const promptText = isTrueFalse
         ? `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
-عدد الأسئلة المطلوبة: ${safeCount}
+عدد الأسئلة المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
+${diversityDirective}
 
-أنشئ ${safeCount} سؤالاً بنمط (صح أم خطأ) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أنشئ ${requestCount} سؤالاً مختلفاً بنمط (صح أم خطأ) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: صح أم خطأ · سؤال 1)
 - question: جملة خبرية أو سؤال قصير مشوق يحتمل الصواب أو الخطأ (أقل من 16 كلمة)
@@ -937,10 +1029,11 @@ async function startServer() {
 - explanationText: تصحيح أو توضيح قصير جداً (أقل من 12 كلمة)`
         : isClues
           ? `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
-عدد الألغاز المطلوبة: ${safeCount}
+عدد الألغاز المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
+${diversityDirective}
 
-أنشئ ${safeCount} لغزاً بنمط (3 تلميحات / من أنا؟) باللغة العربية الفصحى المشوقة والمناسبة لفيديوهات يوتيوب شورتس.
+أنشئ ${requestCount} لغزاً مختلفاً بنمط (3 تلميحات / من أنا؟) باللغة العربية الفصحى المشوقة والمناسبة لفيديوهات يوتيوب شورتس.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: 3 تلميحات · لغز 1)
 - question: سؤال قصير ومشوق (مثال: من أنا؟ أو ما هي هذه الدولة؟ أو من هذا العالم؟ - أقل من 10 كلمات)
@@ -953,22 +1046,26 @@ async function startServer() {
 - explanationText: حقيقة سريعة ومدهشة عن الإجابة (أقل من 12 كلمة)`
           : isVersus
             ? `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
-عدد المقارنات المطلوبة: ${safeCount}
+عدد المقارنات المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
+${discussionGuidelines}
+${diversityDirective}
 
-أنشئ ${safeCount} تحدياً بنمط (مقارنة VS بين طرفين) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الشورتس.
+أنشئ ${requestCount} تحدياً مختلفاً بنمط (مقارنة VS بين طرفين) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الشورتس.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: مقارنة VS · تحدي 1)
-- question: سؤال مقارنة قصير ومباشر (مثال: أيهما أكبر مساحة؟ أو أيهما أسرع؟ أو أيهما أقدم تاريخياً؟ - أقل من 12 كلمة)
+- question: سؤال مقارنة قصير ومباشر (مثال: أيهما أكبر مساحة؟ أو أيهما أسرع؟ أو أيهما تفضل؟ - أقل من 12 كلمة)
 - options: مصفوفة تحتوي اسمَي الطرفين المتنافسين بالضبط (اسمان قصيران واضحان، مثل ["المشتري", "زحل"])
-- correctIndex: 0 إذا كان الطرف الأول هو الصحيح/الأكبر/الأسرع، أو 1 إذا كان الطرف الثاني (نوّع بين 0 و 1)
-- explanationText: معلومة رقمية أو سبب سريع للفوز (أقل من 12 كلمة)`
+- correctIndex: 0 إذا كان الطرف الأول هو الصحيح/الأقوى/الأكثر اختياراً، أو 1 إذا كان الطرف الثاني (نوّع بين 0 و 1)
+- explanationText: معلومة رقمية أو سبب سريع للفوز أو دعوة للنقاش (أقل من 12 كلمة)`
             : `الموضوع أو الفكرة المطلوبة: "${cleanTopic}"
-عدد الأسئلة المطلوبة: ${safeCount}
+عدد الأسئلة المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
 ${mathGuidelines}
+${discussionGuidelines}
+${diversityDirective}
 
-أنشئ ${safeCount} سؤالاً باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أنشئ ${requestCount} سؤالاً مختلفاً ومتنوعاً باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: تحدي المعلومات · سؤال 1)
 - question: نص السؤال القصير والمشوق (أقل من 15 كلمة)
@@ -985,7 +1082,7 @@ ${mathGuidelines}
       };
 
       const quizSystemInstruction =
-        'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.';
+        'أنت خبير في إعداد أسئلة المسابقات والنقاشات التفاعلية والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة والابتكار وتجنب تكرار الأسئلة المستهلكة والاختصار الواضح.';
 
       const externalQuizPrompt = `${promptText}
 
@@ -1011,6 +1108,7 @@ ${mathGuidelines}
               model,
               contents: promptText,
               config: {
+                temperature: isMath ? 0.85 : 1.05,
                 thinkingConfig: {
                   thinkingLevel:
                     model === 'gemini-3.1-flash-lite'
@@ -1068,16 +1166,31 @@ ${mathGuidelines}
                   ) as RawQuizItem[])
                 : [];
 
-            const items = rawArray
-              .filter(
-                (item) =>
-                  item &&
-                  item.question &&
-                  Array.isArray(item.options) &&
-                  item.options.length >= minOpts
-              )
-              .slice(0, safeCount)
-              .map((item, idx) => {
+            const validRaw = rawArray.filter(
+              (item) =>
+                item &&
+                item.question &&
+                Array.isArray(item.options) &&
+                item.options.length >= minOpts
+            );
+
+            const seenInBatch = new Set(avoidNormalizedSet);
+            const uniqueCandidates: RawQuizItem[] = [];
+            const fallbackCandidates: RawQuizItem[] = [];
+
+            for (const item of validRaw) {
+              const qText = String(item.question || '').trim();
+              if (!isDuplicateQuestion(qText, seenInBatch)) {
+                uniqueCandidates.push(item);
+                seenInBatch.add(normalizeQuestionForDedup(qText));
+              } else {
+                fallbackCandidates.push(item);
+              }
+            }
+
+            const chosenRaw = [...uniqueCandidates, ...fallbackCandidates].slice(0, safeCount);
+
+            const items = chosenRaw.map((item, idx) => {
                 if (isTrueFalse) {
                   const rawIdx = Number(item.correctIndex);
                   const cIdx = (rawIdx === 1 ? 1 : 0) as 0 | 1;
@@ -1086,6 +1199,7 @@ ${mathGuidelines}
                   return {
                     id: `ai-slide-${Date.now()}-${idx}`,
                     slideType: 'trueFalse' as const,
+                    category: safeCategory,
                     badgeText: (item.badgeText ?? `صح أم خطأ · ${idx + 1}`).trim(),
                     question: item.question!.trim(),
                     options: [o0, o1, '', ''] as [string, string, string, string],
@@ -1102,6 +1216,7 @@ ${mathGuidelines}
                   return {
                     id: `ai-slide-${Date.now()}-${idx}`,
                     slideType: 'versus' as const,
+                    category: safeCategory,
                     badgeText: (item.badgeText ?? `مقارنة VS · ${idx + 1}`).trim(),
                     question: item.question!.trim(),
                     options: [o0, o1, '', ''] as [string, string, string, string],
@@ -1120,6 +1235,7 @@ ${mathGuidelines}
                   return {
                     id: `ai-slide-${Date.now()}-${idx}`,
                     slideType: 'clues' as const,
+                    category: safeCategory,
                     badgeText: (item.badgeText ?? `3 تلميحات · ${idx + 1}`).trim(),
                     question: item.question!.trim(),
                     options: opts,
@@ -1142,6 +1258,7 @@ ${mathGuidelines}
                 return {
                   id: `ai-slide-${Date.now()}-${idx}`,
                   slideType: 'multiple' as const,
+                  category: safeCategory,
                   badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
                   question: item.question!.trim(),
                   options: opts,
@@ -1160,6 +1277,94 @@ ${mathGuidelines}
         });
 
       res.json({ slides: normalized, provider: usedProvider, model: usedModel });
+    } catch (err) {
+      const formatted = formatGeminiError(err, 'text');
+      res.status(formatted.status).json({
+        error: formatted.message,
+        quotaExhausted: formatted.quotaExhausted,
+      });
+    }
+  });
+
+  // Consult AI to plan a diverse question bank (e.g., 100 or 200 questions split across subtopics)
+  app.post('/api/ai/advise-bank', async (req, res) => {
+    try {
+      const { categoryLabel, targetCount, userMessage, existingSubtopics } = req.body as {
+        categoryLabel?: string;
+        targetCount?: number;
+        userMessage?: string;
+        existingSubtopics?: string[];
+      };
+
+      const safeTarget = Math.max(10, Math.min(500, Math.round(Number(targetCount) || 100)));
+      const cleanCat = (categoryLabel || 'ثقافة عامة').trim();
+      const cleanMsg = (userMessage || '').trim() || `أريد تجهيز ${safeTarget} سؤال متنوع في مجال ${cleanCat}`;
+      const prevTopics = Array.isArray(existingSubtopics) ? existingSubtopics.slice(0, 12).join('، ') : '';
+
+      const advisePrompt = `أنت مستشار محتوى لقنوات يوتيوب شورتس العربية.
+المستخدم يريد بناء بنك ذاكرة كبير (${safeTarget} سؤال) في مجال: "${cleanCat}".
+رسالة المستخدم: "${cleanMsg}"
+${prevTopics ? `المحاور المقترحة مسبقاً: ${prevTopics}` : ''}
+
+استشر المستخدم بأسلوب ودي مختصر (3-4 جمل) واقترح عليه خطة عملية تتضمن 6 إلى 8 محاور فرعية متنوعة ومحددة تضمن عدم تكرار الأسئلة عند توليد ${safeTarget} سؤالاً.
+أرجع JSON فقط بالشكل التالي:
+{
+  "reply": "رد استشاري مختصر بالعربية يخاطب المستخدم ويقترح الخطة ويسأله إن كان يوافق أو يحب تعديلها",
+  "subtopics": ["محور فرعي 1", "محور فرعي 2", "محور فرعي 3", "محور فرعي 4", "محور فرعي 5", "محور فرعي 6"]
+}`;
+
+      const sysInst =
+        'أنت مستشار تخطيط محتوى مسابقات عربية على يوتيوب شورتس. ردودك عملية وواضحة ومختصرة.';
+
+      const { data: plan } = await runTextJsonAcrossProviders({
+        geminiTask: async (ai, model) => {
+          const response = await ai.models.generateContent({
+            model,
+            contents: advisePrompt,
+            config: {
+              temperature: 0.9,
+              thinkingConfig: {
+                thinkingLevel:
+                  model === 'gemini-3.1-flash-lite'
+                    ? ThinkingLevel.MINIMAL
+                    : ThinkingLevel.LOW,
+              },
+              systemInstruction: sysInst,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  reply: { type: Type.STRING },
+                  subtopics: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['reply', 'subtopics'],
+              },
+            },
+          });
+          return response.text ?? '{}';
+        },
+        externalSystemInstruction: sysInst,
+        externalUserPrompt: advisePrompt,
+        parseAndValidate: (payload) => {
+          const obj = (payload && typeof payload === 'object' ? payload : {}) as {
+            reply?: unknown;
+            subtopics?: unknown;
+          };
+          const reply =
+            typeof obj.reply === 'string' && obj.reply.trim()
+              ? obj.reply.trim()
+              : `أقترح تقسيم الـ ${safeTarget} سؤالاً في "${cleanCat}" إلى هذه المحاور المتنوعة لضمان عدم التكرار. هل نبدأ التوليد الآن أم تحب تعديل المحاور؟`;
+          const subtopics = Array.isArray(obj.subtopics)
+            ? obj.subtopics
+                .map((s) => (typeof s === 'string' ? s.trim() : ''))
+                .filter(Boolean)
+                .slice(0, 10)
+            : [];
+          return { reply, subtopics };
+        },
+      });
+
+      res.json(plan);
     } catch (err) {
       const formatted = formatGeminiError(err, 'text');
       res.status(formatted.status).json({

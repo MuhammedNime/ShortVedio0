@@ -33,7 +33,9 @@ import {
   YouTubePlaylistItem,
   YouTubePrivacyStatus,
   YouTubeUploadResult,
+  getWebLoginBaseUrl,
   getYouTubeNativeMode,
+  launchWebLinkLoginForApk,
   uploadVideoToYouTube,
 } from '../services/youtubeClient';
 import {
@@ -967,14 +969,22 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
               <div className="flex flex-col gap-3 pt-2 border-t border-[var(--pline)]">
                 {!ytConnected ? (
                   ytNativeMode === 'standalone-apk' ? (
-                    <div className="flex flex-col gap-2 p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-[11px] text-[var(--pmuted)] leading-relaxed">
+                    <div className="flex flex-col gap-2.5 p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-[11px] text-[var(--pmuted)] leading-relaxed">
                       <p className="font-bold text-[var(--ptxt)]">
-                        النشر من تطبيق الأندرويد (APK):
+                        النشر أو تسجيل الدخول من تطبيق الأندرويد (APK):
                       </p>
+                      <button
+                        type="button"
+                        onClick={() => launchWebLinkLoginForApk(getWebLoginBaseUrl())}
+                        className="flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-white hover:bg-[#f8f9fa] text-[#1f1f1f] border border-[#747775]/45 text-xs font-extrabold shadow-sm transition-colors cursor-pointer"
+                      >
+                        <ExternalLink className="w-4 h-4 text-[#4285F4]" />
+                        <span>تسجيل الدخول عبر رابط الموقع (Chrome) والعودة للتطبيق</span>
+                      </button>
                       <p>
-                        تمنع Google نوافذ تسجيل دخول Firebase داخل تطبيقات الأندرويد المحلية (localhost). بعد اكتمال التصدير بالأعلى، يُحفظ الفيديو تلقائياً في المعرض ويمكنك ضغط زر{' '}
+                        أو بعد اكتمال التصدير بالأعلى، يُحفظ الفيديو تلقائياً في المعرض ويمكنك ضغط زر{' '}
                         <strong className="text-rose-400">«مشاركة / رفع عبر تطبيق YouTube الآن»</strong>{' '}
-                        لإرسال الفيديو مباشرة إلى تطبيق يوتيوب على هاتفك مع نسخ العنوان والوصف تلقائياً.
+                        لإرسال الفيديو مباشرة إلى تطبيق يوتيوب.
                       </p>
                     </div>
                   ) : (

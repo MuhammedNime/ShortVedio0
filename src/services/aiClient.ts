@@ -1,5 +1,6 @@
 import { soundEngine } from '../audio/soundEngine';
-import { QuestionSlide, SlideAudioClip } from '../types/quiz';
+import { getAvoidQuestionsForCategory } from '../storage/questionBankVault';
+import { QUIZ_CATEGORIES, QuestionSlide, QuizCategory, SlideAudioClip } from '../types/quiz';
 
 export type AiVoiceName = 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
 export type AiVoiceMode = 'questionOnly' | 'questionAndAnswer' | 'full';
@@ -205,7 +206,7 @@ async function runApkExternalJsonFallback(
             headers,
             body: JSON.stringify({
               model,
-              temperature: 0.7,
+              temperature: 0.95,
               ...(provider.name === 'groq' ? { response_format: { type: 'json_object' } } : {}),
               messages: [
                 { role: 'system', content: systemInstruction },
@@ -571,16 +572,199 @@ function wrapPcmBase64ToWavDataUrl(base64Audio: string, mimeType: string): strin
   return `data:audio/wav;base64,${btoa(outBin)}`;
 }
 
+const RECENT_AI_QUESTIONS_KEY = 'shorts_quiz_ai_recent_questions_v1';
+
+function normalizeQuestionForDedup(text: string): string {
+  return text
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function isDuplicateQuestion(candidate: string, existingNormalized: Set<string>): boolean {
+  const norm = normalizeQuestionForDedup(candidate);
+  if (!norm) return true;
+  if (existingNormalized.has(norm)) return true;
+
+  const candWords = norm.split(' ').filter((w) => w.length > 2);
+  if (candWords.length < 3) return false;
+  const candSet = new Set(candWords);
+
+  for (const prev of existingNormalized) {
+    const prevWords = prev.split(' ').filter((w) => w.length > 2);
+    if (prevWords.length < 3) continue;
+    let shared = 0;
+    for (const w of candSet) {
+      if (prevWords.includes(w)) shared += 1;
+    }
+    const ratio = shared / Math.max(candSet.size, prevWords.length);
+    if (ratio >= 0.72) return true;
+  }
+  return false;
+}
+
+function getRecentAiQuestions(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_AI_QUESTIONS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((q): q is string => typeof q === 'string' && q.trim().length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordRecentAiQuestions(questions: string[]): void {
+  try {
+    const current = getRecentAiQuestions();
+    const seen = new Set(current.map((q) => normalizeQuestionForDedup(q)));
+    const merged = [...current];
+    for (const q of questions) {
+      const clean = q.trim();
+      const norm = normalizeQuestionForDedup(clean);
+      if (clean && norm && !seen.has(norm)) {
+        seen.add(norm);
+        merged.push(clean);
+      }
+    }
+    localStorage.setItem(RECENT_AI_QUESTIONS_KEY, JSON.stringify(merged.slice(-45)));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function clearRecentAiQuestionHistory(): void {
+  try {
+    localStorage.removeItem(RECENT_AI_QUESTIONS_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+const CLIENT_VARIETY_ANGLES = [
+  'موقف حياتي شائع يختلف الناس في الحكم عليه',
+  'تحدٍّ غير متوقع أو زاوية نفسية واجتماعية عميقة',
+  'اختيار صعب بين قيمتين أو خيارين متقاربين',
+  'معلومة أو مفارقة نادرة تثير فضول المشاهدين',
+  'سؤال يمس التجارب اليومية والشخصية للجمهور',
+  'زاوية تاريخية أو مستقبلية أو ثقافية مبتكرة',
+  'سؤال ذكي يكسر التوقعات المعتادة ويدفع للتعليق',
+  'مقارنة مثيرة بين أسلوبين في الحياة أو التفكير',
+];
+
+function getCategoryMeta(category: QuizCategory = 'general') {
+  return QUIZ_CATEGORIES.find((c) => c.id === category) ?? QUIZ_CATEGORIES[0];
+}
+
+const FALLBACK_CATEGORY_SUBTOPICS: Record<QuizCategory, string[]> = {
+  general: [
+    'معلومات غريبة وحقائق مدهشة',
+    'ألغاز ذكاء وسرعة بديهة',
+    'أوائل واختراعات غيرت العالم',
+    'عجائب الطبيعة والمحيطات',
+    'ثقافة عربية وعالمية متنوعة',
+    'أرقام قياسية ومقارنات مذهلة',
+  ],
+  discussion: [
+    'مواقف حياتية وعملية محيرة',
+    'لو خيروك بين قيمتين أو خيارين صعبين',
+    'العلاقات والصداقة والثقة',
+    'التقنية والسوشيال ميديا وتأثيرها',
+    'الطموح والمال وإدارة الوقت',
+    'قرارات مصيرية وسرعة التصرف',
+  ],
+  sports: [
+    'كأس العالم والبطولات القارية',
+    'أساطير كرة القدم والأرقام القياسية',
+    'دوري أبطال أوروبا والأندية الكبرى',
+    'رياضات أولمبية وعالمية متنوعة',
+    'المنتخبات العربية وإنجازاتها التاريخية',
+    'قوانين كرة القدم ومواقف تحكيمية',
+  ],
+  geography: [
+    'عواصم ودول عربية وعالمية',
+    'الأنهار والبحار والمضائق الشهيرة',
+    'أعلى الجبال وأكبر الصحاري',
+    'معالم سياحية وعجائب الدنيا',
+    'أعلام الدول ومواقعها على الخريطة',
+    'دول غريبة ومعلومات جغرافية نادرة',
+  ],
+  science: [
+    'الفضاء والكواكب والثقوب السوداء',
+    'جسم الإنسان وأسرار الدماغ',
+    'الفيزياء وقوانين الطبيعة المدهشة',
+    'الكيمياء والعناصر والمواد',
+    'عالم الحيوان والكائنات البحرية',
+    'الطب والاختراعات العلمية الحديثة',
+  ],
+  history: [
+    'الحضارة الإسلامية والعصر الذهبي',
+    'الحضارات القديمة (الفراعنة وبابل)',
+    'شخصيات وقادة عبر التاريخ',
+    'معارك وأحداث غيرت مجرى التاريخ',
+    'تاريخ الاكتشافات والرحلات',
+    'مدن ومعالم تاريخية عريقة',
+  ],
+  islamic: [
+    'القرآن الكريم والسور والآيات',
+    'السيرة النبوية والغزوات',
+    'قصص الأنبياء عليهم السلام',
+    'الصحابة والتابعين ومواقفهم',
+    'الفقه والعبادات ومعلومات دينية',
+    'تاريخ المساجد والمعالم الإسلامية',
+  ],
+  technology: [
+    'الذكاء الاصطناعي والمستقبل الرقمي',
+    'تاريخ الحواسيب والهواتف الذكية',
+    'الشركات التقنية الكبرى ومؤسسوها',
+    'الأمن السيبراني والإنترنت',
+    'تطبيقات وألعاب شهيرة وأسرارها',
+    'اختراعات تقنية غيّرت حياتنا اليومية',
+  ],
+  literature: [
+    'أمثال عربية وحكم مأثورة',
+    'شعراء العرب وقصائد خالدة',
+    'معاني الكلمات والمفردات الفصحى',
+    'روايات وكتب عالمية وعربية',
+    'النحو والبلاغة بأسلوب ممتع',
+    'أقوال مأثورة ومن قائلها',
+  ],
+  math: [
+    'الكسور والعمليات السريعة',
+    'الجذور التربيعية والقوى والأسس',
+    'المعادلات الجبرية البسيطة',
+    'المساحة والمحيط والهندسة',
+    'النسبة المئوية والاحتمالات',
+    'ألغاز حسابية وذكاء رياضي',
+  ],
+};
+
 async function generateQuizDirectlyInApk(
   topic: string,
   count: number,
   difficulty: string,
-  contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus'
+  contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus',
+  avoidQuestions: string[] = [],
+  category: QuizCategory = 'general'
 ): Promise<QuestionSlide[]> {
   try {
     const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
 
     const safeCount = Math.max(1, Math.min(12, Math.round(Number(count) || 3)));
+    const requestCount = safeCount <= 3 ? Math.min(5, safeCount + 2) : safeCount;
+    const cleanAvoidList = avoidQuestions.map((q) => q.trim()).filter(Boolean).slice(-50);
+    const avoidNormalizedSet = new Set(
+      cleanAvoidList.map((q) => normalizeQuestionForDedup(q)).filter(Boolean)
+    );
+
+    const categoryMeta = getCategoryMeta(category);
     const diffLabel = difficulty && difficulty.trim() ? difficulty.trim() : 'متنوع';
     const isTrueFalse = contentType === 'trueFalse';
     const isClues = contentType === 'clues';
@@ -590,7 +774,14 @@ async function generateQuizDirectlyInApk(
       !isClues &&
       !isVersus &&
       (contentType === 'math' ||
+        category === 'math' ||
         /رياضيات|جبر|معادل|كسر|كسور|جذر|جذور|حساب|هندسة|مثلث|مشتق|تكامل/i.test(topic));
+    const isDiscussion =
+      !isMath &&
+      !isTrueFalse &&
+      !isClues &&
+      (category === 'discussion' ||
+        /نقاش|جدل|رأي|رأيك|رايك|لو خي|لو خيروك|تفاعل|تعليقات|تفضل|موقف|اجتماعي/i.test(topic));
 
     const mathGuidelines = isMath
       ? `\nملاحظات مهمة لأسئلة الرياضيات:
@@ -599,12 +790,33 @@ async function generateQuizDirectlyInApk(
 - تأكد رياضياً 100% أن الخيار عند correctIndex هو الحل الصحيح الوحيد.`
       : '';
 
+    const discussionGuidelines = isDiscussion
+      ? `\nملاحظات مهمة لأسئلة النقاش والتفاعل في التعليقات:
+- المطلوب أسئلة نقاشية / «لو خُيّرت» / «ما رأيك» تحفّز المشاهدين على النقاش وكتابة اختياراتهم في التعليقات، وتجنب تماماً الأسئلة المستهلكة المكررة (مثل المال أم السعادة أو السفر للماضي أم المستقبل).
+- نوّع الموضوعات بين: العمل، الصداقة، التقنية، العائلة، اتخاذ القرارات، الطموح، العادات اليومية، والمواقف المحيّرة.
+- اجعل الخيارات الأربعة (أو الطرفين في VS) تمثل اختيارات/آراء واضحة ومتقاربة القوة تدفع كل شخص لاختيار موقف والدفاع عنه في التعليقات.
+- اجعل explanationText عبارة قصيرة مشوقة تدعو المشاهد لكتابة رأيه وسببه في التعليقات.`
+      : '';
+
+    const angleHint =
+      CLIENT_VARIETY_ANGLES[Math.floor(Math.random() * CLIENT_VARIETY_ANGLES.length)];
+    const varietySeed = Math.floor(10000 + Math.random() * 90000);
+    const avoidBlock =
+      cleanAvoidList.length > 0
+        ? `\n\nتنبيه صارم — ممنوع تكرار أو إعادة صياغة أي من الأسئلة التالية التي طُرحت سابقاً:\n${cleanAvoidList
+            .map((q, i) => `${i + 1}. ${q}`)
+            .join('\n')}\nابتكر أسئلة جديدة ومختلفة كلياً عن القائمة أعلاه.`
+        : '';
+    const categoryDirective = `\nالمجال / التصنيف المطلوب الالتزام به بدقة: ${categoryMeta.label} (${categoryMeta.promptHint}).`;
+    const diversityDirective = `${categoryDirective}\nزاوية التنويع المطلوبة لهذا الطلب (#${varietySeed}): ${angleHint}.${avoidBlock}`;
+
     const promptText = isTrueFalse
       ? `الموضوع أو الفكرة المطلوبة: "${topic}"
-عدد الأسئلة المطلوبة: ${safeCount}
+عدد الأسئلة المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
+${diversityDirective}
 
-أنشئ ${safeCount} سؤالاً بنمط (صح أم خطأ) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أنشئ ${requestCount} سؤالاً مختلفاً بنمط (صح أم خطأ) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: صح أم خطأ · سؤال 1)
 - question: جملة خبرية أو سؤال قصير مشوق يحتمل الصواب أو الخطأ (أقل من 16 كلمة)
@@ -613,10 +825,11 @@ async function generateQuizDirectlyInApk(
 - explanationText: تصحيح أو توضيح قصير جداً (أقل من 12 كلمة)`
       : isClues
         ? `الموضوع أو الفكرة المطلوبة: "${topic}"
-عدد الألغاز المطلوبة: ${safeCount}
+عدد الألغاز المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
+${diversityDirective}
 
-أنشئ ${safeCount} لغزاً بنمط (3 تلميحات / من أنا؟) باللغة العربية الفصحى المشوقة والمناسبة لفيديوهات يوتيوب شورتس.
+أنشئ ${requestCount} لغزاً مختلفاً بنمط (3 تلميحات / من أنا؟) باللغة العربية الفصحى المشوقة والمناسبة لفيديوهات يوتيوب شورتس.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: 3 تلميحات · لغز 1)
 - question: سؤال قصير ومشوق (مثال: من أنا؟ أو ما هي هذه الدولة؟ - أقل من 10 كلمات)
@@ -629,22 +842,26 @@ async function generateQuizDirectlyInApk(
 - explanationText: حقيقة سريعة ومدهشة عن الإجابة (أقل من 12 كلمة)`
         : isVersus
           ? `الموضوع أو الفكرة المطلوبة: "${topic}"
-عدد المقارنات المطلوبة: ${safeCount}
+عدد المقارنات المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
+${discussionGuidelines}
+${diversityDirective}
 
-أنشئ ${safeCount} تحدياً بنمط (مقارنة VS بين طرفين) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الشورتس.
+أنشئ ${requestCount} تحدياً مختلفاً بنمط (مقارنة VS بين طرفين) باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الشورتس.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: مقارنة VS · تحدي 1)
-- question: سؤال مقارنة قصير ومباشر (مثال: أيهما أكبر مساحة؟ أو أيهما أسرع؟ - أقل من 12 كلمة)
+- question: سؤال مقارنة قصير ومباشر (مثال: أيهما أكبر مساحة؟ أو أيهما أسرع؟ أو أيهما تفضل؟ - أقل من 12 كلمة)
 - options: مصفوفة تحتوي اسمَي الطرفين المتنافسين بالضبط (اسمان قصيران واضحان)
-- correctIndex: 0 إذا كان الطرف الأول هو الصحيح، أو 1 إذا كان الطرف الثاني (نوّع بين 0 و 1)
-- explanationText: معلومة رقمية أو سبب سريع للفوز (أقل من 12 كلمة)`
+- correctIndex: 0 إذا كان الطرف الأول هو الصحيح/الأكثر اختياراً، أو 1 إذا كان الطرف الثاني (نوّع بين 0 و 1)
+- explanationText: معلومة رقمية أو سبب سريع للفوز أو دعوة للنقاش (أقل من 12 كلمة)`
           : `الموضوع أو الفكرة المطلوبة: "${topic}"
-عدد الأسئلة المطلوبة: ${safeCount}
+عدد الأسئلة المطلوبة: ${requestCount}
 مستوى الصعوبة: ${diffLabel}
 ${mathGuidelines}
+${discussionGuidelines}
+${diversityDirective}
 
-أنشئ ${safeCount} سؤالاً باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
+أنشئ ${requestCount} سؤالاً مختلفاً ومتنوعاً باللغة العربية الفصحى السلسة والمناسبة لفيديوهات الأسئلة.
 أرجع مصفوفة JSON فقط (JSON Array) بدون أي نص إضافي خارج JSON، بحيث يحتوي كل عنصر على:
 - badgeText: عنوان قصير للشارة العلوية (مثال: تحدي المعلومات · سؤال 1)
 - question: نص السؤال القصير والمشوق (أقل من 15 كلمة)
@@ -653,7 +870,7 @@ ${mathGuidelines}
 - explanationText: توضيح قصير جداً للإجابة (أقل من 12 كلمة)`;
 
     const quizSystemInstruction =
-      'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.';
+      'أنت خبير في إعداد أسئلة المسابقات والنقاشات التفاعلية والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة والابتكار وتجنب تكرار الأسئلة المستهلكة والاختصار الواضح.';
 
     type RawApkQuizItem = {
       badgeText?: string;
@@ -675,6 +892,7 @@ ${mathGuidelines}
               model: 'gemini-4-hydrogen',
               contents: promptText,
               config: {
+                temperature: isMath ? 0.85 : 1.05,
                 thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 systemInstruction: quizSystemInstruction,
                 responseMimeType: 'application/json',
@@ -699,6 +917,7 @@ ${mathGuidelines}
               model: 'gemini-3.1-flash-lite',
               contents: promptText,
               config: {
+                temperature: isMath ? 0.85 : 1.05,
                 thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
                 systemInstruction: quizSystemInstruction,
                 responseMimeType: 'application/json',
@@ -747,14 +966,28 @@ ${mathGuidelines}
     }
 
     const minOpts = isTrueFalse || isVersus ? 2 : 4;
-    const normalized = parsed
-      .filter(
-        (item) =>
-          item &&
-          item.question &&
-          Array.isArray(item.options) &&
-          item.options.length >= minOpts
-      )
+    const validRaw = parsed.filter(
+      (item) =>
+        item &&
+        item.question &&
+        Array.isArray(item.options) &&
+        item.options.length >= minOpts
+    );
+
+    const seenInBatch = new Set(avoidNormalizedSet);
+    const uniqueCandidates: RawApkQuizItem[] = [];
+    const fallbackCandidates: RawApkQuizItem[] = [];
+    for (const item of validRaw) {
+      const qText = String(item.question || '').trim();
+      if (!isDuplicateQuestion(qText, seenInBatch)) {
+        uniqueCandidates.push(item);
+        seenInBatch.add(normalizeQuestionForDedup(qText));
+      } else {
+        fallbackCandidates.push(item);
+      }
+    }
+
+    const normalized = [...uniqueCandidates, ...fallbackCandidates]
       .slice(0, safeCount)
       .map((item, idx) => {
         if (isTrueFalse) {
@@ -765,6 +998,7 @@ ${mathGuidelines}
           return {
             id: `ai-slide-${Date.now()}-${idx}`,
             slideType: 'trueFalse' as const,
+            category,
             badgeText: (item.badgeText ?? `صح أم خطأ · ${idx + 1}`).trim(),
             question: item.question!.trim(),
             options: [o0, o1, '', ''] as [string, string, string, string],
@@ -781,6 +1015,7 @@ ${mathGuidelines}
           return {
             id: `ai-slide-${Date.now()}-${idx}`,
             slideType: 'versus' as const,
+            category,
             badgeText: (item.badgeText ?? `مقارنة VS · ${idx + 1}`).trim(),
             question: item.question!.trim(),
             options: [o0, o1, '', ''] as [string, string, string, string],
@@ -799,6 +1034,7 @@ ${mathGuidelines}
           return {
             id: `ai-slide-${Date.now()}-${idx}`,
             slideType: 'clues' as const,
+            category,
             badgeText: (item.badgeText ?? `3 تلميحات · ${idx + 1}`).trim(),
             question: item.question!.trim(),
             options: opts,
@@ -822,6 +1058,7 @@ ${mathGuidelines}
         return {
           id: `ai-slide-${Date.now()}-${idx}`,
           slideType: 'multiple' as const,
+          category,
           badgeText: (item.badgeText ?? `السؤال ${idx + 1}`).trim(),
           question: item.question!.trim(),
           options: opts,
@@ -983,36 +1220,177 @@ async function fetchAi(path: string, payload: unknown): Promise<Response> {
   }
 }
 
+export interface BankAdviseResult {
+  reply: string;
+  subtopics: string[];
+  isFallback?: boolean;
+}
+
+export async function adviseQuestionBankPlan(params: {
+  category: QuizCategory;
+  targetCount: number;
+  userMessage: string;
+  existingSubtopics?: string[];
+}): Promise<BankAdviseResult> {
+  const meta = getCategoryMeta(params.category);
+  const safeTarget = Math.max(10, Math.min(500, Math.round(params.targetCount || 100)));
+  const fallbackSubs = FALLBACK_CATEGORY_SUBTOPICS[params.category] ?? FALLBACK_CATEGORY_SUBTOPICS.general;
+  const fallbackResult: BankAdviseResult = {
+    reply: `جهّزت لك خطة مقترحة لتوليد ${safeTarget} سؤال في مجال «${meta.label}» مقسّمة على ${fallbackSubs.length} محاور فرعية مختلفة حتى نضمن عدم التكرار. يمكنك تعديل أي محور أو الضغط على «اعتماد وتوليد الدفعات الآن».`,
+    subtopics: fallbackSubs,
+    isFallback: true,
+  };
+
+  try {
+    if (hasAnyEmbeddedTextAiKeys() && !BUILD_API_BASE) {
+      const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
+      const prevTopics = (params.existingSubtopics ?? []).slice(0, 10).join('، ');
+      const advisePrompt = `أنت مستشار محتوى لقنوات يوتيوب شورتس العربية.
+المستخدم يريد بناء بنك ذاكرة كبير (${safeTarget} سؤال) في مجال: "${meta.label} (${meta.promptHint})".
+رسالة المستخدم: "${params.userMessage || `أريد تجهيز ${safeTarget} سؤال متنوع`}"
+${prevTopics ? `المحاور المقترحة مسبقاً: ${prevTopics}` : ''}
+
+استشر المستخدم بأسلوب ودي مختصر (3 جمل) واقترح عليه 6 إلى 8 محاور فرعية متنوعة تضمن عدم تكرار الأسئلة.
+أرجع JSON فقط بالشكل:
+{
+  "reply": "...",
+  "subtopics": ["...", "..."]
+}`;
+      const sysInst = 'أنت مستشار تخطيط محتوى مسابقات عربية على يوتيوب شورتس. ردودك عملية ومختصرة.';
+      let parsed: { reply?: unknown; subtopics?: unknown } | null = null;
+      if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0) {
+        try {
+          const response = await runApkGeminiWithRotation(async (apiKey) => {
+            const ai = new GoogleGenAI({ apiKey });
+            return ai.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents: advisePrompt,
+              config: {
+                temperature: 0.9,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                systemInstruction: sysInst,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    reply: { type: Type.STRING },
+                    subtopics: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ['reply', 'subtopics'],
+                },
+              },
+            });
+          });
+          parsed = extractClientJsonPayload(response.text ?? '{}') as {
+            reply?: unknown;
+            subtopics?: unknown;
+          };
+        } catch {
+          parsed = null;
+        }
+      }
+      if (!parsed && (EMBEDDED_CLIENT_GROQ_KEYS.length > 0 || EMBEDDED_CLIENT_OPENROUTER_KEYS.length > 0)) {
+        parsed = (await runApkExternalJsonFallback(sysInst, advisePrompt)) as {
+          reply?: unknown;
+          subtopics?: unknown;
+        };
+      }
+      if (parsed) {
+        const subtopics = Array.isArray(parsed.subtopics)
+          ? parsed.subtopics.map((s) => String(s).trim()).filter(Boolean).slice(0, 10)
+          : [];
+        if (subtopics.length > 0) {
+          return {
+            reply:
+              typeof parsed.reply === 'string' && parsed.reply.trim()
+                ? parsed.reply.trim()
+                : fallbackResult.reply,
+            subtopics,
+          };
+        }
+      }
+      return fallbackResult;
+    }
+
+    const res = await fetchAi('/api/ai/advise-bank', {
+      categoryLabel: `${meta.label} (${meta.promptHint})`,
+      targetCount: safeTarget,
+      userMessage: params.userMessage,
+      existingSubtopics: params.existingSubtopics,
+    });
+    const data = await parseJsonSafe<{ reply?: string; subtopics?: string[]; error?: string }>(res);
+    if (!res.ok || !Array.isArray(data.subtopics) || data.subtopics.length === 0) {
+      return fallbackResult;
+    }
+    return {
+      reply: data.reply?.trim() || fallbackResult.reply,
+      subtopics: data.subtopics.map((s) => s.trim()).filter(Boolean).slice(0, 10),
+    };
+  } catch {
+    return fallbackResult;
+  }
+}
+
 export async function generateAiQuizSlides(
   topic: string,
   count: number,
   difficulty: string,
-  contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus' = 'general'
+  contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus' = 'general',
+  existingQuestions: string[] = [],
+  category: QuizCategory = 'general'
 ): Promise<QuestionSlide[]> {
+  const bankAvoid = await getAvoidQuestionsForCategory(category, 45);
+  const mergedAvoid = Array.from(
+    new Set(
+      [...getRecentAiQuestions(), ...existingQuestions, ...bankAvoid]
+        .map((q) => q.trim())
+        .filter((q) => q.length >= 4)
+    )
+  ).slice(-55);
+
+  const categoryMeta = getCategoryMeta(category);
+
+  let slides: QuestionSlide[];
   if (hasAnyEmbeddedTextAiKeys() && !BUILD_API_BASE) {
-    return generateQuizDirectlyInApk(topic, count, difficulty, contentType);
-  }
-
-  const res = await fetchAi('/api/ai/generate-quiz', {
-    topic,
-    count,
-    difficulty,
-    contentType,
-  });
-
-  const data = await parseJsonSafe<{
-    slides?: QuestionSlide[];
-    error?: string;
-    quotaExhausted?: boolean;
-  }>(res);
-  if (!res.ok || !data.slides) {
-    throw new AiApiError(
-      data.error || 'تعذر توليد الأسئلة من الخادم.',
-      res.status,
-      Boolean(data.quotaExhausted)
+    slides = await generateQuizDirectlyInApk(
+      topic,
+      count,
+      difficulty,
+      contentType,
+      mergedAvoid,
+      category
     );
+  } else {
+    const res = await fetchAi('/api/ai/generate-quiz', {
+      topic,
+      count,
+      difficulty,
+      contentType,
+      category,
+      categoryHint: `${categoryMeta.label} (${categoryMeta.promptHint})`,
+      avoidQuestions: mergedAvoid,
+    });
+
+    const data = await parseJsonSafe<{
+      slides?: QuestionSlide[];
+      error?: string;
+      quotaExhausted?: boolean;
+    }>(res);
+    if (!res.ok || !data.slides) {
+      throw new AiApiError(
+        data.error || 'تعذر توليد الأسئلة من الخادم.',
+        res.status,
+        Boolean(data.quotaExhausted)
+      );
+    }
+    slides = data.slides.map((s) => ({
+      ...s,
+      category: s.category ?? category,
+    }));
   }
-  return data.slides;
+
+  recordRecentAiQuestions(slides.map((s) => s.question));
+  return slides;
 }
 
 export async function generateSingleTtsClip(

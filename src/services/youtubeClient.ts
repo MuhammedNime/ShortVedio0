@@ -1,14 +1,17 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
   GoogleAuthProvider,
   User,
-  getAuth,
   onAuthStateChanged,
   signInWithPopup,
   signOut,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { isAndroidNativeApp, openExternalBrowserUrl } from '../utils/nativeDownload';
+import {
+  ensureFirestoreUserProfile,
+  firebaseAuth,
+  signInFirebaseWithCredentialTokens,
+} from './firebaseClient';
 
 export const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
@@ -68,6 +71,9 @@ export type YouTubeNativeMode = 'web-firebase' | 'native-backend-oauth' | 'stand
 
 const ENV_MAP = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
 const BUILD_API_BASE = (ENV_MAP.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
+const WEB_LOGIN_URL_STORAGE_KEY = 'shorts_quiz_web_login_url_v1';
+export const DEFAULT_STUDIO_WEB_URL =
+  'https://ais-pre-kkuzuevv2bg4w2jelrl6jf-709762298831.europe-west2.run.app';
 
 function hasRemoteBackend(): boolean {
   return /^https?:\/\/(?!localhost\b|127\.0\.0\.1\b)/i.test(BUILD_API_BASE);
@@ -78,8 +84,37 @@ export function getYouTubeNativeMode(): YouTubeNativeMode {
   return hasRemoteBackend() ? 'native-backend-oauth' : 'standalone-apk';
 }
 
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const auth = getAuth(app);
+export function getWebLoginBaseUrl(): string {
+  if (hasRemoteBackend()) return BUILD_API_BASE;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const saved = (localStorage.getItem(WEB_LOGIN_URL_STORAGE_KEY) || '').trim().replace(/\/$/, '');
+      if (/^https?:\/\//i.test(saved)) return saved;
+    } catch {
+      // ignore
+    }
+  }
+  if (typeof window !== 'undefined' && /^https?:\/\/(?!localhost\b|127\.0\.0\.1\b)/i.test(window.location.origin)) {
+    return window.location.origin;
+  }
+  return DEFAULT_STUDIO_WEB_URL;
+}
+
+export function setWebLoginBaseUrl(url: string): void {
+  const clean = (url || '').trim().replace(/\/$/, '');
+  if (typeof localStorage === 'undefined') return;
+  try {
+    if (!clean) {
+      localStorage.removeItem(WEB_LOGIN_URL_STORAGE_KEY);
+    } else if (/^https?:\/\//i.test(clean)) {
+      localStorage.setItem(WEB_LOGIN_URL_STORAGE_KEY, clean);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+const auth = firebaseAuth;
 
 function buildGoogleProvider(): GoogleAuthProvider {
   const provider = new GoogleAuthProvider();
@@ -93,9 +128,21 @@ function buildGoogleProvider(): GoogleAuthProvider {
 // Strictly in-memory OAuth access token cache (never stored in localStorage/sessionStorage)
 let isSigningIn = false;
 let memoryAccessToken: string | null = null;
+let memoryIdToken: string | null = null;
 let memoryTokenExpiresAt = 0;
 let memoryChannel: YouTubeChannelInfo | null = null;
 let memoryEmail: string | null = null;
+let pendingDeepLinkWaiter:
+  | {
+      resolve: (res: {
+        accessToken: string;
+        channel: YouTubeChannelInfo | null;
+        email: string | null;
+      }) => void;
+      reject: (err: Error) => void;
+      timeoutId: number;
+    }
+  | null = null;
 
 type SessionListener = (session: YouTubeSessionState) => void;
 const sessionListeners = new Set<SessionListener>();
@@ -103,6 +150,7 @@ let authListenerUnsubscribe: (() => void) | null = null;
 
 function clearMemorySession(): void {
   memoryAccessToken = null;
+  memoryIdToken = null;
   memoryTokenExpiresAt = 0;
   memoryChannel = null;
   memoryEmail = null;
@@ -119,7 +167,69 @@ function notifySessionListeners(): void {
   });
 }
 
+async function handleIncomingAndroidAuthDeepLink(deepLinkUrl: string): Promise<void> {
+  const waiter = pendingDeepLinkWaiter;
+  if (waiter) {
+    window.clearTimeout(waiter.timeoutId);
+    pendingDeepLinkWaiter = null;
+  }
+
+  try {
+    const hashIdx = deepLinkUrl.indexOf('#');
+    const fragment = hashIdx >= 0 ? deepLinkUrl.slice(hashIdx + 1) : '';
+    const params = new URLSearchParams(fragment);
+    const payloadRaw = params.get('payload') || '';
+    const payload = decodeBase64UrlJson<{
+      type?: string;
+      accessToken?: string;
+      idToken?: string | null;
+      expiresIn?: number;
+      email?: string | null;
+      channel?: YouTubeChannelInfo | null;
+      error?: string;
+    }>(payloadRaw);
+
+    if (!payload || payload.type !== 'YOUTUBE_OAUTH_SUCCESS' || !payload.accessToken) {
+      const err = new Error(payload?.error || 'لم تكتمل مصادقة Google بنجاح.');
+      waiter?.reject(err);
+      return;
+    }
+
+    memoryAccessToken = payload.accessToken;
+    memoryIdToken = payload.idToken ?? null;
+    memoryTokenExpiresAt = Date.now() + (payload.expiresIn ?? 3400) * 1000;
+    memoryEmail = payload.email ?? null;
+    memoryChannel = payload.channel ?? (await fetchYouTubeChannel(payload.accessToken).catch(() => null));
+
+    if (payload.idToken || payload.accessToken) {
+      await signInFirebaseWithCredentialTokens(payload.idToken, payload.accessToken);
+    }
+
+    notifySessionListeners();
+    waiter?.resolve({
+      accessToken: payload.accessToken,
+      channel: memoryChannel,
+      email: memoryEmail,
+    });
+  } catch (err) {
+    waiter?.reject(
+      err instanceof Error ? err : new Error('تعذر قراءة بيانات المصادقة من الرابط.')
+    );
+  }
+}
+
+function registerPersistentAndroidDeepLinkHandler(): void {
+  if (typeof window === 'undefined') return;
+  const w = window as unknown as {
+    __onAndroidYouTubeAuth?: (deepLinkUrl: string) => void;
+  };
+  w.__onAndroidYouTubeAuth = (deepLinkUrl: string) => {
+    void handleIncomingAndroidAuthDeepLink(deepLinkUrl);
+  };
+}
+
 function ensureAuthStateSubscription(): void {
+  registerPersistentAndroidDeepLinkHandler();
   if (authListenerUnsubscribe) return;
   authListenerUnsubscribe = onAuthStateChanged(auth, (user: User | null) => {
     if (user) {
@@ -197,11 +307,54 @@ function decodeBase64UrlJson<T>(raw: string): T | null {
   }
 }
 
+function encodeBase64UrlJson(obj: unknown): string {
+  const jsonStr = JSON.stringify(obj);
+  const bytes = new TextEncoder().encode(jsonStr);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export function launchWebLinkLoginForApk(customBaseUrl?: string): boolean {
+  registerPersistentAndroidDeepLinkHandler();
+  if (customBaseUrl !== undefined) {
+    setWebLoginBaseUrl(customBaseUrl);
+  }
+  const baseUrl = (customBaseUrl || getWebLoginBaseUrl()).trim().replace(/\/$/, '');
+  if (!/^https?:\/\//i.test(baseUrl)) return false;
+  const separator = baseUrl.includes('?') ? '&' : '?';
+  return openExternalBrowserUrl(`${baseUrl}${separator}apk_login=1`);
+}
+
+export async function completeApkWebLoginFromBrowser(): Promise<{
+  deepLinkUrl: string;
+  email: string | null;
+  channel: YouTubeChannelInfo | null;
+}> {
+  const res = await connectYouTubeWithPopup();
+  const payload = encodeBase64UrlJson({
+    type: 'YOUTUBE_OAUTH_SUCCESS',
+    accessToken: res.accessToken,
+    idToken: memoryIdToken,
+    expiresIn: 3400,
+    email: res.email,
+    channel: res.channel,
+  });
+  return {
+    deepLinkUrl: `com.shortsquiz.studio0://youtube-auth#payload=${payload}`,
+    email: res.email,
+    channel: res.channel,
+  };
+}
+
 async function connectViaNativeExternalBrowser(): Promise<{
   accessToken: string;
   channel: YouTubeChannelInfo | null;
   email: string | null;
 }> {
+  registerPersistentAndroidDeepLinkHandler();
   const res = await fetch(
     `${BUILD_API_BASE}/api/youtube/auth-url?appRedirect=${encodeURIComponent('com.shortsquiz.studio0://youtube-auth')}`
   );
@@ -211,55 +364,22 @@ async function connectViaNativeExternalBrowser(): Promise<{
   }
 
   return new Promise((resolve, reject) => {
-    const w = window as unknown as {
-      __onAndroidYouTubeAuth?: (deepLinkUrl: string) => void;
-    };
+    if (pendingDeepLinkWaiter) {
+      window.clearTimeout(pendingDeepLinkWaiter.timeoutId);
+      pendingDeepLinkWaiter = null;
+    }
 
     const timeoutId = window.setTimeout(() => {
-      delete w.__onAndroidYouTubeAuth;
+      pendingDeepLinkWaiter = null;
       reject(new Error('انتهت مهلة انتظار العودة من متصفح Google. حاول مرة أخرى.'));
     }, 180_000);
 
-    w.__onAndroidYouTubeAuth = async (deepLinkUrl: string) => {
-      window.clearTimeout(timeoutId);
-      delete w.__onAndroidYouTubeAuth;
-      try {
-        const hashIdx = deepLinkUrl.indexOf('#');
-        const fragment = hashIdx >= 0 ? deepLinkUrl.slice(hashIdx + 1) : '';
-        const params = new URLSearchParams(fragment);
-        const payloadRaw = params.get('payload') || '';
-        const payload = decodeBase64UrlJson<{
-          type?: string;
-          accessToken?: string;
-          expiresIn?: number;
-          channel?: YouTubeChannelInfo | null;
-          error?: string;
-        }>(payloadRaw);
-
-        if (!payload || payload.type !== 'YOUTUBE_OAUTH_SUCCESS' || !payload.accessToken) {
-          reject(new Error(payload?.error || 'لم تكتمل مصادقة Google بنجاح.'));
-          return;
-        }
-
-        memoryAccessToken = payload.accessToken;
-        memoryTokenExpiresAt = Date.now() + (payload.expiresIn ?? 3400) * 1000;
-        memoryEmail = null;
-        memoryChannel = payload.channel ?? (await fetchYouTubeChannel(payload.accessToken));
-        notifySessionListeners();
-        resolve({
-          accessToken: payload.accessToken,
-          channel: memoryChannel,
-          email: memoryEmail,
-        });
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error('تعذر قراءة بيانات المصادقة من الرابط.'));
-      }
-    };
+    pendingDeepLinkWaiter = { resolve, reject, timeoutId };
 
     const opened = openExternalBrowserUrl(data.url!);
     if (!opened) {
       window.clearTimeout(timeoutId);
-      delete w.__onAndroidYouTubeAuth;
+      pendingDeepLinkWaiter = null;
       reject(new Error('تعذر فتح متصفح النظام لإتمام تسجيل الدخول.'));
     }
   });
@@ -324,9 +444,12 @@ export async function connectYouTubeWithPopup(): Promise<{
     }
 
     memoryAccessToken = credential.accessToken;
+    memoryIdToken = credential.idToken || null;
     memoryTokenExpiresAt = Date.now() + 3400 * 1000;
     memoryEmail = result.user.email || null;
     memoryChannel = null;
+
+    void ensureFirestoreUserProfile(result.user);
 
     try {
       memoryChannel = await fetchYouTubeChannel(credential.accessToken);

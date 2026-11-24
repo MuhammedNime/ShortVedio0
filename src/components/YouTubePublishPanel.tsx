@@ -3,6 +3,7 @@ import {
   CalendarClock,
   Check,
   Copy,
+  ExternalLink,
   Film,
   Loader2,
   LogOut,
@@ -16,7 +17,9 @@ import {
   YouTubeChannelInfo,
   YouTubePlaylistItem,
   YouTubePrivacyStatus,
+  getWebLoginBaseUrl,
   getYouTubeNativeMode,
+  launchWebLinkLoginForApk,
 } from '../services/youtubeClient';
 import { QuizProject } from '../types/quiz';
 
@@ -132,6 +135,9 @@ export const YouTubePublishPanel: React.FC<YouTubePublishPanelProps> = ({
   const [isGeneratingKit, setIsGeneratingKit] = useState(false);
   const [kitError, setKitError] = useState('');
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [webLoginUrl, setWebLoginUrl] = useState(() => getWebLoginBaseUrl());
+  const [showWebUrlEdit, setShowWebUrlEdit] = useState(false);
+  const [webLinkError, setWebLinkError] = useState('');
 
   const handleGenerateKit = async () => {
     if (isGeneratingKit) return;
@@ -198,12 +204,54 @@ export const YouTubePublishPanel: React.FC<YouTubePublishPanelProps> = ({
           getYouTubeNativeMode() === 'standalone-apk' ? (
             <div className="flex flex-col gap-2.5 p-2.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)]">
               <p className="text-[11px] text-[var(--pmuted)] leading-relaxed">
-                في نسخة الـ APK المستقلة تمنع Google نوافذ تسجيل دخول Firebase (`localhost`). لنشر الفيديو بسهولة: جهّز العنوان والوصف بالأسفل ثم اضغط{' '}
-                <strong className="text-[#00B050]">تصدير الفيديو</strong>{' '}
-                وسيُحفظ في الاستوديو/المعرض مع زر{' '}
-                <strong className="text-rose-400">مشاركة / رفع لتطبيق YouTube</strong>{' '}
-                مباشرة.
+                يمكنك تسجيل الدخول عبر{' '}
+                <strong className="text-[var(--ptxt)]">رابط الموقع في المتصفح</strong>{' '}
+                (تضغط الرابط فيفتح Chrome لتسجيل الدخول بحساب Google ثم يعود بك تلقائياً للتطبيق)، أو تصدير الفيديو ومشاركته لتطبيق يوتيوب مباشرة.
               </p>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setWebLinkError('');
+                  const ok = launchWebLinkLoginForApk(webLoginUrl);
+                  if (!ok) {
+                    setWebLinkError('يرجى التأكد من صحة رابط الموقع (يبدأ بـ https://).');
+                  }
+                }}
+                className="flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-white hover:bg-[#f8f9fa] text-[#1f1f1f] border border-[#747775]/45 text-xs font-extrabold shadow-sm transition-colors cursor-pointer"
+              >
+                <ExternalLink className="w-4 h-4 text-[#4285F4]" />
+                <span>تسجيل الدخول عبر رابط الموقع (Chrome) والعودة للتطبيق</span>
+              </button>
+
+              <div className="flex items-center justify-between text-[10px] text-[var(--pmuted)]">
+                <span className="truncate max-w-[210px]" dir="ltr">
+                  {webLoginUrl}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowWebUrlEdit((v) => !v)}
+                  className="text-[#00B050] font-bold hover:underline cursor-pointer shrink-0"
+                >
+                  {showWebUrlEdit ? 'إغلاق' : 'تعديل رابط الموقع'}
+                </button>
+              </div>
+
+              {showWebUrlEdit && (
+                <input
+                  type="url"
+                  dir="ltr"
+                  value={webLoginUrl}
+                  onChange={(e) => setWebLoginUrl(e.target.value)}
+                  placeholder="https://..."
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--surface)] border border-[var(--pline)] text-[11px] text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+                />
+              )}
+
+              {webLinkError && (
+                <p className="text-[11px] text-rose-400">{webLinkError}</p>
+              )}
+
               <button
                 type="button"
                 onClick={onOpenExport}
