@@ -82,13 +82,9 @@ export function subscribeTtsQuota(listener: (q: TtsQuotaSnapshot) => void): () =
 
 const ENV_MAP = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
 const BUILD_API_BASE = (ENV_MAP.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
-const EMBEDDED_CLIENT_GEMINI_KEYS = (() => {
-  const numberedKeys = Array.from({ length: 10 }, (_, idx) => ENV_MAP[`VITE_GEMINI_API_KEY_${idx + 1}`] || '');
-  const combined = [
-    ENV_MAP.VITE_GEMINI_API_KEY || '',
-    ENV_MAP.VITE_GEMINI_API_KEYS || '',
-    ...numberedKeys,
-  ].join('\n');
+
+function parseEmbeddedClientKeys(names: string[]): string[] {
+  const combined = names.map((n) => ENV_MAP[n] || '').join('\n');
   const seen = new Set<string>();
   const list: string[] = [];
   for (const part of combined.split(/[\s,;]+/)) {
@@ -98,7 +94,143 @@ const EMBEDDED_CLIENT_GEMINI_KEYS = (() => {
     list.push(clean);
   }
   return list;
-})();
+}
+
+const EMBEDDED_CLIENT_GEMINI_KEYS = parseEmbeddedClientKeys([
+  'VITE_GEMINI_API_KEY',
+  'VITE_GEMINI_API_KEYS',
+  ...Array.from({ length: 10 }, (_, idx) => `VITE_GEMINI_API_KEY_${idx + 1}`),
+]);
+
+const EMBEDDED_CLIENT_GROQ_KEYS = parseEmbeddedClientKeys([
+  'VITE_GROQ_API_KEY',
+  'VITE_GROQ_API_KEYS',
+]);
+
+const EMBEDDED_CLIENT_OPENROUTER_KEYS = parseEmbeddedClientKeys([
+  'VITE_OPENROUTER_API_KEY',
+  'VITE_OPENROUTER_API_KEYS',
+]);
+
+function hasAnyEmbeddedTextAiKeys(): boolean {
+  return (
+    EMBEDDED_CLIENT_GEMINI_KEYS.length > 0 ||
+    EMBEDDED_CLIENT_GROQ_KEYS.length > 0 ||
+    EMBEDDED_CLIENT_OPENROUTER_KEYS.length > 0
+  );
+}
+
+function extractClientJsonPayload(rawText: string): unknown {
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const startObj = cleaned.indexOf('{');
+    const startArr = cleaned.indexOf('[');
+    const start =
+      startObj !== -1 && startArr !== -1
+        ? Math.min(startObj, startArr)
+        : Math.max(startObj, startArr);
+    if (start === -1) throw new Error('لم يُرجع الذكاء الاصطناعي بيانات JSON صالحة.');
+    const openChar = cleaned[start];
+    const closeChar = openChar === '{' ? '}' : ']';
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === openChar) depth++;
+      else if (ch === closeChar) {
+        depth--;
+        if (depth === 0) return JSON.parse(cleaned.slice(start, i + 1));
+      }
+    }
+    throw new Error('تعذر قراءة JSON من استجابة الذكاء الاصطناعي.');
+  }
+}
+
+async function runApkExternalJsonFallback(
+  systemInstruction: string,
+  userPrompt: string
+): Promise<unknown> {
+  const providers: Array<{
+    name: 'groq' | 'openrouter';
+    endpoint: string;
+    keys: string[];
+    models: string[];
+  }> = [
+    {
+      name: 'groq',
+      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+      keys: EMBEDDED_CLIENT_GROQ_KEYS,
+      models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
+    },
+    {
+      name: 'openrouter',
+      endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+      keys: EMBEDDED_CLIENT_OPENROUTER_KEYS,
+      models: [
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'google/gemma-3-27b-it:free',
+        'openrouter/free',
+      ],
+    },
+  ];
+
+  let lastErr: unknown = new AiApiError('لا توجد مفاتيح احتياطية مضافة.', 500, false);
+  for (const provider of providers) {
+    if (provider.keys.length === 0) continue;
+    for (const apiKey of provider.keys) {
+      for (const model of provider.models) {
+        try {
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          };
+          if (provider.name === 'openrouter') {
+            headers['X-Title'] = 'Shorts Quiz Studio';
+          }
+          const res = await fetch(provider.endpoint, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model,
+              temperature: 0.7,
+              ...(provider.name === 'groq' ? { response_format: { type: 'json_object' } } : {}),
+              messages: [
+                { role: 'system', content: systemInstruction },
+                { role: 'user', content: userPrompt },
+              ],
+            }),
+          });
+          const bodyText = await res.text();
+          if (!res.ok) {
+            throw new Error(`${provider.name} HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
+          }
+          const parsed = JSON.parse(bodyText) as {
+            choices?: Array<{ message?: { content?: string | null } }>;
+          };
+          const content = (parsed.choices?.[0]?.message?.content ?? '').trim();
+          if (!content) throw new Error(`${provider.name} empty response`);
+          return extractClientJsonPayload(content);
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+    }
+  }
+  throw lastErr;
+}
 
 const APK_COOLDOWN_STORAGE_KEY = 'apk_gemini_key_cooldowns_v1';
 const apkMemoryCooldowns = new Map<string, number>();
@@ -520,73 +652,99 @@ ${mathGuidelines}
 - correctIndex: رقم صحيح من 0 إلى 3 يمثل الإجابة الصحيحة
 - explanationText: توضيح قصير جداً للإجابة (أقل من 12 كلمة)`;
 
-    const response = await runApkGeminiWithRotation(async (apiKey) => {
-      const ai = new GoogleGenAI({ apiKey });
-      try {
-        return await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
-          contents: promptText,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            systemInstruction:
-              'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  badgeText: { type: Type.STRING },
-                  question: { type: Type.STRING },
-                  options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  correctIndex: { type: Type.INTEGER },
-                  explanationText: { type: Type.STRING },
-                },
-                required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
-              },
-            },
-          },
-        });
-      } catch {
-        return ai.models.generateContent({
-          model: 'gemini-3.1-flash-lite',
-          contents: promptText,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-            systemInstruction:
-              'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  badgeText: { type: Type.STRING },
-                  question: { type: Type.STRING },
-                  options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  correctIndex: { type: Type.INTEGER },
-                  explanationText: { type: Type.STRING },
-                },
-                required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
-              },
-            },
-          },
-        });
-      }
-    });
+    const quizSystemInstruction =
+      'أنت خبير في إعداد أسئلة المسابقات والتحديات والرياضيات لفيديوهات يوتيوب باللغة العربية. التزم بالدقة العلمية والرياضية، الاختصار الواضح، وتنويع موضع الإجابة الصحيحة.';
 
-    const rawText = (response.text ?? '[]').trim();
-    const cleanedJson = rawText
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
-    const parsed = JSON.parse(cleanedJson) as Array<{
+    type RawApkQuizItem = {
       badgeText?: string;
       question?: string;
       options?: string[];
       correctIndex?: number;
       explanationText?: string;
-    }>;
+    };
+
+    let parsed: RawApkQuizItem[] = [];
+    let geminiErr: unknown = null;
+
+    if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0) {
+      try {
+        const response = await runApkGeminiWithRotation(async (apiKey) => {
+          const ai = new GoogleGenAI({ apiKey });
+          try {
+            return await ai.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents: promptText,
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                systemInstruction: quizSystemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      badgeText: { type: Type.STRING },
+                      question: { type: Type.STRING },
+                      options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      correctIndex: { type: Type.INTEGER },
+                      explanationText: { type: Type.STRING },
+                    },
+                    required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
+                  },
+                },
+              },
+            });
+          } catch {
+            return ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite',
+              contents: promptText,
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+                systemInstruction: quizSystemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      badgeText: { type: Type.STRING },
+                      question: { type: Type.STRING },
+                      options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      correctIndex: { type: Type.INTEGER },
+                      explanationText: { type: Type.STRING },
+                    },
+                    required: ['badgeText', 'question', 'options', 'correctIndex', 'explanationText'],
+                  },
+                },
+              },
+            });
+          }
+        });
+
+        const rawJson = extractClientJsonPayload(response.text ?? '[]');
+        parsed = Array.isArray(rawJson) ? (rawJson as RawApkQuizItem[]) : [];
+      } catch (err) {
+        geminiErr = err;
+      }
+    }
+
+    if (parsed.length === 0) {
+      if (EMBEDDED_CLIENT_GROQ_KEYS.length > 0 || EMBEDDED_CLIENT_OPENROUTER_KEYS.length > 0) {
+        const extPayload = await runApkExternalJsonFallback(
+          quizSystemInstruction,
+          `${promptText}\n\nتنسيق الإرجاع المطلوب (JSON Object فقط بدون أي نص إضافي):\n{\n  "slides": [\n    {\n      "badgeText": "...",\n      "question": "...",\n      "options": ["..."],\n      "correctIndex": 0,\n      "explanationText": "..."\n    }\n  ]\n}`
+        );
+        parsed = Array.isArray(extPayload)
+          ? (extPayload as RawApkQuizItem[])
+          : extPayload && typeof extPayload === 'object'
+            ? (((extPayload as { slides?: unknown; questions?: unknown }).slides ??
+                (extPayload as { questions?: unknown }).questions ??
+                []) as RawApkQuizItem[])
+            : [];
+      } else if (geminiErr) {
+        throw geminiErr;
+      }
+    }
 
     const minOpts = isTrueFalse || isVersus ? 2 : 4;
     const normalized = parsed
@@ -831,7 +989,7 @@ export async function generateAiQuizSlides(
   difficulty: string,
   contentType: 'general' | 'math' | 'trueFalse' | 'clues' | 'versus' = 'general'
 ): Promise<QuestionSlide[]> {
-  if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0 && !BUILD_API_BASE) {
+  if (hasAnyEmbeddedTextAiKeys() && !BUILD_API_BASE) {
     return generateQuizDirectlyInApk(topic, count, difficulty, contentType);
   }
 
@@ -1071,7 +1229,7 @@ export async function generateYoutubePublishKit(
     throw new AiApiError('لا توجد أسئلة صالحة لتوليد بيانات النشر.', 400);
   }
 
-  if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0 && !BUILD_API_BASE) {
+  if (hasAnyEmbeddedTextAiKeys() && !BUILD_API_BASE) {
     try {
       const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
       const isShorts = aspectRatio !== '16:9';
@@ -1093,37 +1251,55 @@ ${summaryLines}
 - tags: مصفوفة من 8 إلى 12 كلمة مفتاحية قوية للبحث في يوتيوب بدون علامة #
 - pinnedComment: تعليق تفاعلي قصير وممتع جاهز للتثبيت تحت الفيديو يدفع المشاهدين لكتابة نتيجتهم في التعليقات`;
 
-      const response = await runApkGeminiWithRotation(async (apiKey) => {
-        const ai = new GoogleGenAI({ apiKey });
-        return ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
-          contents: promptText,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            systemInstruction:
-              'أنت خبير سيو يوتيوب وصناعة محتوى شورتس المسابقات باللغة العربية. اكتب عناوين عالية النقر بدون حشو، وأوصافاً طبيعية، وتعليقات تفاعلية ذكية.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                description: { type: Type.STRING },
-                hashtags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                pinnedComment: { type: Type.STRING },
-              },
-              required: ['title', 'description', 'hashtags', 'tags', 'pinnedComment'],
-            },
-          },
-        });
-      });
+      const kitSystemInstruction =
+        'أنت خبير سيو يوتيوب وصناعة محتوى شورتس المسابقات باللغة العربية. اكتب عناوين عالية النقر بدون حشو، وأوصافاً طبيعية، وتعليقات تفاعلية ذكية.';
 
-      const rawText = (response.text ?? '{}').trim();
-      const cleaned = rawText
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-      const parsed = JSON.parse(cleaned) as Partial<YoutubePublishKit>;
+      let parsed: Partial<YoutubePublishKit> | null = null;
+      let geminiErr: unknown = null;
+
+      if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0) {
+        try {
+          const response = await runApkGeminiWithRotation(async (apiKey) => {
+            const ai = new GoogleGenAI({ apiKey });
+            return ai.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents: promptText,
+              config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                systemInstruction: kitSystemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    hashtags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    pinnedComment: { type: Type.STRING },
+                  },
+                  required: ['title', 'description', 'hashtags', 'tags', 'pinnedComment'],
+                },
+              },
+            });
+          });
+          parsed = extractClientJsonPayload(response.text ?? '{}') as Partial<YoutubePublishKit>;
+        } catch (err) {
+          geminiErr = err;
+        }
+      }
+
+      if (!parsed || (!parsed.title && !parsed.description)) {
+        if (EMBEDDED_CLIENT_GROQ_KEYS.length > 0 || EMBEDDED_CLIENT_OPENROUTER_KEYS.length > 0) {
+          parsed = (await runApkExternalJsonFallback(
+            kitSystemInstruction,
+            `${promptText}\n\nأرجع JSON Object صالح فقط بالحقول: title, description, hashtags, tags, pinnedComment.`
+          )) as Partial<YoutubePublishKit>;
+        } else if (geminiErr) {
+          throw geminiErr;
+        } else {
+          parsed = {};
+        }
+      }
       const hashtags = Array.isArray(parsed.hashtags)
         ? parsed.hashtags
             .map((h) => String(h).trim())

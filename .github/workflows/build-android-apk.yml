@@ -56,24 +56,59 @@ jobs:
           VITE_GEMINI_API_KEY_8: ${{ secrets.GEMINI_API_KEY_8 || '' }}
           VITE_GEMINI_API_KEY_9: ${{ secrets.GEMINI_API_KEY_9 || '' }}
           VITE_GEMINI_API_KEY_10: ${{ secrets.GEMINI_API_KEY_10 || '' }}
+          VITE_GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || '' }}
+          VITE_GROQ_API_KEYS: ${{ secrets.GROQ_API_KEYS || '' }}
+          VITE_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || '' }}
+          VITE_OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS || '' }}
           VITE_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID || '' }}
         run: npm run build
 
-      - name: Initialize & sync Capacitor Android project
+      - name: Initialize & configure Capacitor Android project
         run: |
           if [ ! -d "android" ]; then
             npx cap add android
           fi
           npx cap sync android
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
-            sed -i 's|<application|<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />\n\n    <application|' "$MANIFEST"
-          fi
-          GRADLE_FILE="android/app/build.gradle"
-          if [ -f "$GRADLE_FILE" ]; then
-            sed -i "s/versionCode [0-9]\+/versionCode ${{ github.run_number }}/" "$GRADLE_FILE"
-            sed -i "s/versionName \"[^\"]*\"/versionName \"1.0.${{ github.run_number }}\"/" "$GRADLE_FILE"
-          fi
+
+          mkdir -p android/app/src/main/java/com/shortsquiz/studio0
+          cp android-native/MainActivity.java android/app/src/main/java/com/shortsquiz/studio0/MainActivity.java
+          mkdir -p android/app/src/main/res/xml
+          cp android-native/file_paths.xml android/app/src/main/res/xml/file_paths.xml
+
+          node -e '
+            const fs = require("fs");
+            const manifestPath = "android/app/src/main/AndroidManifest.xml";
+            let m = fs.readFileSync(manifestPath, "utf8");
+            if (!m.includes("android:usesCleartextTraffic")) {
+              m = m.replace("<application", "<application\n        android:usesCleartextTraffic=\"true\"");
+            }
+            const perms = [
+              "<uses-permission android:name=\"android.permission.RECORD_AUDIO\" />",
+              "<uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />",
+              "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />"
+            ];
+            for (const p of perms) {
+              const permName = p.match(/name="([^"]+)"/)[1];
+              if (!m.includes(permName)) {
+                m = m.replace("</manifest>", `    ${p}\n</manifest>`);
+              }
+            }
+            fs.writeFileSync(manifestPath, m);
+
+            const gradlePath = "android/app/build.gradle";
+            let g = fs.readFileSync(gradlePath, "utf8");
+            g = g.replace(/versionCode\s+\d+/, "versionCode ${{ github.run_number }}");
+            g = g.replace(/versionName\s+"[^"]*"/, "versionName \"1.0.${{ github.run_number }}\"");
+            if (!g.includes("signingConfigs")) {
+              const signingBlock = `    signingConfigs {\n        release {\n            if (System.getenv("ANDROID_KEYSTORE_PATH")) {\n                storeFile file(System.getenv("ANDROID_KEYSTORE_PATH"))\n                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")\n                keyAlias System.getenv("ANDROID_KEY_ALIAS")\n                keyPassword System.getenv("ANDROID_KEY_PASSWORD")\n            }\n        }\n    }\n    buildTypes {`;
+              g = g.replace("    buildTypes {", signingBlock);
+              g = g.replace(
+                /buildTypes\s*\{\s*release\s*\{/,
+                "buildTypes {\n        release {\n            signingConfig System.getenv(\"ANDROID_KEYSTORE_PATH\") ? signingConfigs.release : signingConfigs.debug"
+              );
+            }
+            fs.writeFileSync(gradlePath, g);
+          '
 
       - name: Copy app launcher icons to Android resources
         run: |
@@ -86,63 +121,28 @@ jobs:
 
       - name: Build Android Debug & Release APKs
         working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug assembleRelease --no-daemon
-
-      - name: Prepare & sign APK release files
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || '' }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || '' }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || '' }}
         run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > /tmp/release.keystore
+            export ANDROID_KEYSTORE_PATH="/tmp/release.keystore"
+          fi
+          chmod +x gradlew
+          ./gradlew assembleDebug assembleRelease --no-daemon
+          rm -f /tmp/release.keystore
+
+      - name: Prepare APK release files
+        run: |
           mkdir -p release-apks
           cp android/app/build/outputs/apk/debug/app-debug.apk release-apks/shorts-quiz-studio-debug.apk
-
-          APKSIGNER="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort -V | tail -n 1)"
-          ZIPALIGN="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name zipalign | sort -V | tail -n 1)"
-
           if [ -f "android/app/build/outputs/apk/release/app-release.apk" ]; then
             cp android/app/build/outputs/apk/release/app-release.apk release-apks/shorts-quiz-studio-release.apk
           elif [ -f "android/app/build/outputs/apk/release/app-release-unsigned.apk" ]; then
-            UNSIGNED="android/app/build/outputs/apk/release/app-release-unsigned.apk"
-            ALIGNED="release-apks/app-release-aligned.apk"
-            if [ -n "$ZIPALIGN" ]; then
-              "$ZIPALIGN" -f -p 4 "$UNSIGNED" "$ALIGNED"
-            else
-              cp "$UNSIGNED" "$ALIGNED"
-            fi
-
-            if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$APKSIGNER" ]; then
-              printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > /tmp/release.keystore
-              "$APKSIGNER" sign \
-                --ks /tmp/release.keystore \
-                --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD}" \
-                --ks-key-alias "${ANDROID_KEY_ALIAS}" \
-                --key-pass "pass:${ANDROID_KEY_PASSWORD}" \
-                --out release-apks/shorts-quiz-studio-release.apk \
-                "$ALIGNED"
-              rm -f /tmp/release.keystore "$ALIGNED"
-            elif [ -n "$APKSIGNER" ]; then
-              if [ ! -f "$HOME/.android/debug.keystore" ]; then
-                mkdir -p "$HOME/.android"
-                keytool -genkey -v -keystore "$HOME/.android/debug.keystore" \
-                  -storepass android -alias androiddebugkey -keypass android \
-                  -keyalg RSA -keysize 2048 -validity 10000 \
-                  -dname "CN=Android Debug,O=Android,C=US"
-              fi
-              "$APKSIGNER" sign \
-                --ks "$HOME/.android/debug.keystore" \
-                --ks-pass pass:android \
-                --ks-key-alias androiddebugkey \
-                --key-pass pass:android \
-                --out release-apks/shorts-quiz-studio-release.apk \
-                "$ALIGNED"
-              rm -f "$ALIGNED"
-            else
-              mv "$ALIGNED" release-apks/shorts-quiz-studio-release-unsigned.apk
-            fi
+            cp android/app/build/outputs/apk/release/app-release-unsigned.apk release-apks/shorts-quiz-studio-release-unsigned.apk
           fi
 
       - name: Upload APK Artifact
@@ -170,7 +170,7 @@ jobs:
           name: ${{ steps.release_meta.outputs.name }}
           body: |
             تم بناء تطبيق **استوديو شورتس الأسئلة (Shorts Quiz Studio)** تلقائياً (الإصدار `1.0.${{ github.run_number }}`):
-            - **`shorts-quiz-studio-release.apk`**: نسخة جاهزة للتثبيت المباشر على أندرويد.
+            - **`shorts-quiz-studio-release.apk`**: نسخة Release موقّعة جاهزة للتثبيت المباشر على أندرويد.
             - **`shorts-quiz-studio-debug.apk`**: نسخة Debug للاختبار.
           make_latest: true
           files: |

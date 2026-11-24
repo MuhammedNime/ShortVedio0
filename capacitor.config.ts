@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.shortsquiz.studio',
+  appId: 'com.shortsquiz.studio0',
   appName: 'استوديو شورتس الأسئلة',
   webDir: 'dist',
   server: {
