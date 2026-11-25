@@ -5,6 +5,7 @@ import {
   Copy,
   ExternalLink,
   Film,
+  Image as ImageIcon,
   Loader2,
   LogOut,
   RefreshCw,
@@ -103,6 +104,8 @@ interface YouTubePublishPanelProps {
   onConnectYouTube: () => void;
   onDisconnectYouTube: () => void;
   onOpenExport: () => void;
+  customThumbnailPreviewUrl?: string | null;
+  onOpenThumbnailStudio?: () => void;
 }
 
 export const YouTubePublishPanel: React.FC<YouTubePublishPanelProps> = ({
@@ -131,6 +134,8 @@ export const YouTubePublishPanel: React.FC<YouTubePublishPanelProps> = ({
   onConnectYouTube,
   onDisconnectYouTube,
   onOpenExport,
+  customThumbnailPreviewUrl,
+  onOpenThumbnailStudio,
 }) => {
   const [isGeneratingKit, setIsGeneratingKit] = useState(false);
   const [kitError, setKitError] = useState('');
@@ -581,7 +586,42 @@ export const YouTubePublishPanel: React.FC<YouTubePublishPanelProps> = ({
         </label>
       </section>
 
-      {/* 4. Primary CTA to Export & Upload */}
+      {/* 4. Thumbnail & Export CTA */}
+      {onOpenThumbnailStudio && (
+        <div className="rounded-xl bg-[var(--surface)] border border-[var(--pline)] p-3 flex items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            {customThumbnailPreviewUrl ? (
+              <img
+                src={customThumbnailPreviewUrl}
+                alt="غلاف يوتيوب المخصص"
+                className="w-16 h-10 rounded-lg object-cover border border-[#00B050]/60 shrink-0"
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-lg bg-[var(--panel)] border border-[var(--pline)] flex items-center justify-center shrink-0">
+                <ImageIcon className="w-5 h-5 text-[var(--gold)]" />
+              </div>
+            )}
+            <div className="flex flex-col min-w-0">
+              <span className="text-xs font-extrabold text-[var(--ptxt)] truncate">
+                {customThumbnailPreviewUrl ? 'غلاف يوتيوب مخصص مُرفق ✅' : 'غلاف الفيديو (Thumbnail)'}
+              </span>
+              <span className="text-[10px] text-[var(--pmuted)] truncate">
+                {customThumbnailPreviewUrl
+                  ? 'سيُرفع تلقائياً كصورة غلاف للفيديو'
+                  : 'صمّم غلافاً احترافياً لزيادة نسبة النقر'}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenThumbnailStudio}
+            className="px-3 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--gold)]/60 hover:border-[var(--gold)] text-[11px] font-extrabold text-[var(--gold)] shrink-0 cursor-pointer"
+          >
+            {customThumbnailPreviewUrl ? 'تعديل الغلاف' : 'تصميم الغلاف'}
+          </button>
+        </div>
+      )}
+
       <button
         type="button"
         onClick={onOpenExport}

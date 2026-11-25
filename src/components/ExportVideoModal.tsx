@@ -8,6 +8,7 @@ import {
   Download,
   ExternalLink,
   Film,
+  Image as ImageIcon,
   Layers,
   Loader2,
   LogOut,
@@ -80,6 +81,9 @@ interface ExportVideoModalProps extends SharedYouTubeProps {
   isOpen: boolean;
   project: QuizProject;
   onClose: () => void;
+  customThumbnailBlob?: Blob | null;
+  customThumbnailPreviewUrl?: string | null;
+  onOpenThumbnailStudio?: () => void;
 }
 
 type ExportScopeMode = 'full' | 'single' | 'splitBatch';
@@ -110,6 +114,9 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
   ytAuthError,
   onConnectYouTube,
   onDisconnectYouTube,
+  customThumbnailBlob,
+  customThumbnailPreviewUrl,
+  onOpenThumbnailStudio,
 }) => {
   const [scopeMode, setScopeMode] = useState<ExportScopeMode>('full');
   const [formatPref, setFormatPref] = useState<ExportFormatPreference>('auto');
@@ -563,6 +570,7 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
         publishAtIso,
         playlistId: selectedPlaylistId || undefined,
         pinnedComment: ytAutoPostComment ? publishKit.pinnedComment : undefined,
+        thumbnailBlob: customThumbnailBlob,
         onProgress: (pct, txt) => {
           setYtUploadPct(pct);
           setYtUploadStage(txt);
@@ -1119,6 +1127,37 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
                       <span>نشر التعليق التفاعلي تلقائياً تحت الفيديو (عند النشر كغير مدرج أو علني)</span>
                     </label>
 
+                    {onOpenThumbnailStudio && (
+                      <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[var(--panel)] border border-[var(--pline)]">
+                        <div className="flex items-center gap-2 min-w-0">
+                          {customThumbnailPreviewUrl ? (
+                            <img
+                              src={customThumbnailPreviewUrl}
+                              alt="غلاف مخصص"
+                              className="w-12 h-8 rounded object-cover border border-[#00B050]/50 shrink-0"
+                            />
+                          ) : (
+                            <ImageIcon className="w-4 h-4 text-[var(--gold)] shrink-0" />
+                          )}
+                          <span className="text-[11px] font-bold truncate">
+                            {customThumbnailPreviewUrl
+                              ? 'غلاف مصغّر مخصص جاهز للرفع ✅'
+                              : 'إرفاق غلاف مصغّر مخصص (Thumbnail)'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            onOpenThumbnailStudio();
+                          }}
+                          className="px-2.5 py-1 rounded-md bg-[var(--surface)] border border-[var(--gold)]/60 text-[10px] font-extrabold text-[var(--gold)] shrink-0 cursor-pointer"
+                        >
+                          {customThumbnailPreviewUrl ? 'تعديل' : 'تصميم الغلاف'}
+                        </button>
+                      </div>
+                    )}
+
                     {!confirmUploadOpen && !isUploadingYt && (
                       <button
                         type="button"
@@ -1227,6 +1266,16 @@ export const ExportVideoModal: React.FC<ExportVideoModalProps> = ({
                         <ExternalLink className="w-3 h-3" />
                       </a>
                     </div>
+                    {ytResult.thumbnailApplied && (
+                      <p className="text-[11px] text-[#00B050] dark:text-[#6ee7b7] font-bold">
+                        ✓ تم رفع وتعيين صورة الغلاف المصغّر المخصصة بنجاح!
+                      </p>
+                    )}
+                    {ytResult.thumbnailNote && (
+                      <p className="text-[11px] text-amber-300 leading-relaxed">
+                        {ytResult.thumbnailNote}
+                      </p>
+                    )}
                     {ytResult.commentNote && (
                       <p className="text-[11px] text-[var(--ptxt)] leading-relaxed">
                         {ytResult.commentNote}

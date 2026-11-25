@@ -28,8 +28,20 @@ export function openExternalBrowserUrl(url: string): boolean {
   if (bridge?.openExternalUrl) {
     return Boolean(bridge.openExternalUrl(clean));
   }
-  const win = window.open(clean, '_blank', 'noopener,noreferrer');
-  return Boolean(win);
+  if (typeof document === 'undefined') return false;
+  try {
+    const a = document.createElement('a');
+    a.href = clean;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeExportMime(mimeType?: string, fileName?: string): string {

@@ -26,6 +26,7 @@ import {
   AiVoiceMode,
   AiVoiceName,
   generateSingleTtsClip,
+  generateSlidePuzzleIllustration,
   generateSlideVoiceoverSafe,
 } from '../services/aiClient';
 import { readFileAsDataUrl } from '../storage/projectStore';
@@ -77,6 +78,7 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
   const [voicingTarget, setVoicingTarget] = useState<string | null>(null);
   const [voiceStepText, setVoiceStepText] = useState('');
   const [voiceError, setVoiceError] = useState('');
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [mathTarget, setMathTarget] = useState<'question' | 0 | 1 | 2 | 3 | null>(null);
 
   if (!activeSlide) return null;
@@ -372,6 +374,42 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
       imageName: file.name,
     });
     e.target.value = '';
+  };
+
+  const handleGenerateSlidePuzzleImage = async () => {
+    if (isGeneratingImage) return;
+    if (!activeSlide.question.trim()) {
+      setVoiceError('اكتب نص السؤال أولاً ثم اضغط توليد صورة اللغز.');
+      return;
+    }
+    setVoiceError('');
+    setIsGeneratingImage(true);
+    try {
+      const correctAns =
+        activeSlide.slideType === 'clues'
+          ? activeSlide.options[3]
+          : activeSlide.options[activeSlide.correctIndex];
+      const res = await generateSlidePuzzleIllustration(
+        activeSlide.question,
+        activeSlide.category,
+        correctAns
+      );
+      onUpdateSlide(activeIndex, {
+        ...activeSlide,
+        imageDataUrl: res.dataUrl,
+        imageName: res.imageName,
+        imageChallengeMode:
+          activeSlide.imageChallengeMode && activeSlide.imageChallengeMode !== 'normal'
+            ? activeSlide.imageChallengeMode
+            : 'blurToClear',
+      });
+    } catch (err) {
+      setVoiceError(
+        err instanceof Error ? err.message : 'تعذر توليد صورة اللغز بالذكاء الاصطناعي.'
+      );
+    } finally {
+      setIsGeneratingImage(false);
+    }
   };
 
   const removeVoiceover = (target: 'question' | 'answer' | 0 | 1 | 2 | 3) => {
@@ -950,14 +988,31 @@ export const SlidesEditorPanel: React.FC<SlidesEditorPanelProps> = ({
               </div>
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={() => fileInputsRef.current['slideImage']?.click()}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[11px] font-medium text-[var(--pmuted)] hover:text-[var(--ptxt)] transition-colors cursor-pointer"
-            >
-              <ImagePlus className="w-3.5 h-3.5 text-[var(--gold)]" />
-              <span>+ إضافة صورة للسؤال (عادي أو تحدي صورة مموّهة 🔍)</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-1.5 w-full">
+              <button
+                type="button"
+                onClick={() => fileInputsRef.current['slideImage']?.click()}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[var(--surface)] hover:border-[var(--gold)] border border-[var(--pline)] text-[11px] font-medium text-[var(--pmuted)] hover:text-[var(--ptxt)] transition-colors cursor-pointer"
+              >
+                <ImagePlus className="w-3.5 h-3.5 text-[var(--gold)]" />
+                <span>+ إضافة صورة للسؤال</span>
+              </button>
+              <button
+                type="button"
+                disabled={isGeneratingImage}
+                onClick={() => void handleGenerateSlidePuzzleImage()}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00B050]/12 hover:bg-[#00B050]/22 border border-[#00B050]/45 disabled:opacity-50 text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] transition-colors cursor-pointer"
+              >
+                {isGeneratingImage ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {isGeneratingImage ? 'جارٍ رسم اللغز...' : 'رسم صورة لغز بالذكاء 🔍'}
+                </span>
+              </button>
+            </div>
           )}
         </div>
       </div>

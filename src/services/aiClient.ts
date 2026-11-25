@@ -1733,3 +1733,143 @@ ${summaryLines}
     pinnedComment: data.pinnedComment || '',
   };
 }
+
+function sanitizeClientSvg(rawSvg: string): string {
+  const cleaned = String(rawSvg || '')
+    .replace(/<\?xml[\s\S]*?\?>/gi, '')
+    .replace(/<!DOCTYPE[\s\S]*?>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(?:xlink:)?href\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '')
+    .trim();
+  const match = cleaned.match(/<svg[\s\S]*<\/svg>/i);
+  if (!match) return '';
+  let svg = match[0];
+  if (!/viewBox=/i.test(svg)) {
+    svg = svg.replace(/<svg/i, '<svg viewBox="0 0 600 450"');
+  }
+  if (!/xmlns=/i.test(svg)) {
+    svg = svg.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  return svg;
+}
+
+async function rasterizeSvgToPngDataUrl(svgString: string): Promise<string> {
+  const safeSvg = sanitizeClientSvg(svgString);
+  if (!safeSvg) {
+    throw new Error('صيغة الرسم التوضيحي غير صالحة.');
+  }
+  if (typeof document === 'undefined') {
+    throw new Error('تعذر تحويل الرسم إلى صورة في هذه البيئة.');
+  }
+
+  const blob = new Blob([safeSvg], { type: 'image/svg+xml;charset=utf-8' });
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('تعذر تحميل الرسم لتحويله لصورة PNG.'));
+      image.src = blobUrl;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = 600;
+    canvas.height = 450;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) throw new Error('تعذر تهيئة لوحة الرسم.');
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, 600, 450);
+    ctx.drawImage(img, 0, 0, 600, 450);
+    return canvas.toDataURL('image/png');
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+export async function generateSlidePuzzleIllustration(
+  question: string,
+  categoryLabel?: string,
+  hint?: string
+): Promise<{ dataUrl: string; imageName: string }> {
+  const cleanQuestion = question.trim();
+  if (!cleanQuestion) {
+    throw new AiApiError('اكتب نص السؤال أولاً قبل توليد صورة اللغز.', 400);
+  }
+
+  if (hasAnyEmbeddedTextAiKeys() && !BUILD_API_BASE) {
+    try {
+      const { GoogleGenAI, ThinkingLevel, Type } = await import('@google/genai');
+      const sys =
+        'You are an expert flat-vector geometric illustrator. Output valid JSON with a clean, colorful, recognizable <svg viewBox="0 0 600 450" xmlns="http://www.w3.org/2000/svg"> illustration representing the quiz subject without revealing the answer as written text.';
+      const prompt = `Quiz Question (Arabic): ${cleanQuestion}
+${categoryLabel ? `Category: ${categoryLabel}\n` : ''}${hint ? `Visual clue hint: ${hint}\n` : ''}
+Create a vivid high-contrast vector illustration SVG (viewBox="0 0 600 450") for a blurred mystery quiz card.
+NEVER include <text> or <tspan> or written words/numbers inside the SVG.
+Return JSON: {"svg": "<svg ...>...</svg>", "title": "..."}`;
+
+      let parsed: { svg?: string; title?: string } | null = null;
+      if (EMBEDDED_CLIENT_GEMINI_KEYS.length > 0) {
+        const response = await runApkGeminiWithRotation(async (apiKey) => {
+          const ai = new GoogleGenAI({ apiKey });
+          return ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              systemInstruction: sys,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  svg: { type: Type.STRING },
+                  title: { type: Type.STRING },
+                },
+                required: ['svg', 'title'],
+              },
+            },
+          });
+        });
+        parsed = extractClientJsonPayload(response.text ?? '{}') as { svg?: string; title?: string };
+      } else {
+        parsed = (await runApkExternalJsonFallback(sys, prompt)) as { svg?: string; title?: string };
+      }
+      const pngDataUrl = await rasterizeSvgToPngDataUrl(parsed?.svg || '');
+      return {
+        dataUrl: pngDataUrl,
+        imageName: `${(parsed?.title || 'لغز بالذكاء').trim()}.png`,
+      };
+    } catch (err) {
+      if (err instanceof AiApiError) throw err;
+      throw formatGeminiClientError(err);
+    }
+  }
+
+  const res = await fetchAi('/api/ai/generate-puzzle-svg', {
+    question: cleanQuestion,
+    categoryLabel,
+    hint,
+  });
+
+  const data = await parseJsonSafe<{
+    svg?: string;
+    title?: string;
+    error?: string;
+    quotaExhausted?: boolean;
+  }>(res);
+
+  if (!res.ok || !data.svg) {
+    throw new AiApiError(
+      data.error || 'تعذر توليد صورة اللغز من الخادم.',
+      res.status,
+      Boolean(data.quotaExhausted)
+    );
+  }
+
+  const pngDataUrl = await rasterizeSvgToPngDataUrl(data.svg);
+  return {
+    dataUrl: pngDataUrl,
+    imageName: `${(data.title || 'صورة لغز بالذكاء').trim()}.png`,
+  };
+}
+

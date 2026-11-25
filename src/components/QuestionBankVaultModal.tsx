@@ -6,6 +6,8 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Circle,
   Cloud,
   Download,
@@ -13,6 +15,7 @@ import {
   ExternalLink,
   FileText,
   FileUp,
+  Film,
   Folder,
   FolderInput,
   FolderOpen,
@@ -31,6 +34,7 @@ import {
   Square,
   Trash2,
   Volume2,
+  WifiOff,
   X,
 } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
@@ -42,8 +46,10 @@ import {
   generateSlideVoiceoverSafe,
 } from '../services/aiClient';
 import {
+  CloudSyncMeta,
   deleteCloudBankFolder,
   deleteCloudBankQuestion,
+  getCloudSyncMeta,
   pushBankFoldersToCloud,
   pushBankQuestionsToCloud,
   renameCloudBankFolder,
@@ -54,6 +60,7 @@ import {
   updateCloudBankQuestion,
   updateCloudBankQuestionUsed,
   updateCloudBankQuestionsFolder,
+  updateCloudBankQuestionsUsedBatch,
 } from '../services/firebaseClient';
 import { getWebLoginBaseUrl, launchWebLinkLoginForApk } from '../services/youtubeClient';
 import {
@@ -77,9 +84,22 @@ import {
   moveBankQuestionsToFolder,
   parseManualBulkQuestionsText,
   renameBankFolder,
+  seedAllStarterBanksIfNeeded,
   updateBankQuestionItem,
 } from '../storage/questionBankVault';
-import { QUIZ_CATEGORIES, QuestionSlide, QuizCategory, SlideType } from '../types/quiz';
+import {
+  saveProjectsToLibraryBatch,
+} from '../storage/projectStore';
+import {
+  QUIZ_CATEGORIES,
+  QuestionSlide,
+  QuizCategory,
+  QuizProject,
+  SlideType,
+  applyChannelThemePreset,
+  applyStudioThemePreset,
+  createDefaultProject,
+} from '../types/quiz';
 import { isAndroidNativeApp, saveOrDownloadBlob } from '../utils/nativeDownload';
 
 interface QuestionBankVaultModalProps {
@@ -92,7 +112,8 @@ interface QuestionBankVaultModalProps {
     mode: 'append' | 'replace',
     enableAutoSync: boolean,
     warningMessage?: string,
-    applyMathTheme?: boolean
+    themePreset?: boolean | 'math' | 'islamic',
+    aspectRatioOverride?: '9:16' | '16:9'
   ) => void;
 }
 
@@ -241,15 +262,28 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
     folderId: string;
   } | null>(null);
 
-  // Voiceover on "تحويل لفيديو"
+  // Voiceover & Theme on "تحويل لفيديو"
   const [withVoiceOnInsert, setWithVoiceOnInsert] = useState(true);
   const [voiceModeOnInsert, setVoiceModeOnInsert] = useState<AiVoiceMode>('full');
   const [autoApplyMathTheme, setAutoApplyMathTheme] = useState(true);
+  const [autoApplyIslamicTheme, setAutoApplyIslamicTheme] = useState(true);
   const [workingItemId, setWorkingItemId] = useState<string | null>(null);
+  const [batchConvertState, setBatchConvertState] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
+  const batchConvertAbortRef = useRef(false);
 
-  // Cloud & Notices
+  // Cloud, Online Status & Notices
   const [cloudUser, setCloudUser] = useState<User | null>(null);
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [syncProgressText, setSyncProgressText] = useState('');
+  const [cloudSyncMeta, setCloudSyncMeta] = useState<CloudSyncMeta | null>(() => getCloudSyncMeta());
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
+  const [isSeedingStarter, setIsSeedingStarter] = useState(false);
   const [notice, setNotice] = useState('');
   const [errorNotice, setErrorNotice] = useState('');
   const importFileRef = useRef<HTMLInputElement | null>(null);
@@ -276,7 +310,36 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    void loadAllData();
+    setCloudSyncMeta(getCloudSyncMeta());
+    let cancelled = false;
+
+    const initVault = async () => {
+      setIsSeedingStarter(true);
+      try {
+        const res = await seedAllStarterBanksIfNeeded(false);
+        if (!cancelled && res.addedCount > 0) {
+          setNotice(
+            `تم تحميل +${res.addedCount} سؤالاً في بنوك البداية والمجلدات (الإسلاميات، الرياضيات، العلوم، الجغرافيا، الرياضة، التاريخ، والألغاز)!`
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setErrorNotice(
+            err instanceof Error ? err.message : 'تعذر تحميل بنوك الأسئلة المدمجة.'
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSeedingStarter(false);
+          await loadAllData();
+        }
+      }
+    };
+
+    void initVault();
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, loadAllData]);
 
   useEffect(() => {
@@ -286,15 +349,26 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
   }, []);
 
   useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !isAiRunning) {
+      if (e.key === 'Escape' && !isAiRunning && !batchConvertState) {
         onClose();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isOpen, isAiRunning, onClose]);
+  }, [isOpen, isAiRunning, batchConvertState, onClose]);
 
   const folderOptions = useMemo(() => buildIndentedFolderOptions(folders), [folders]);
 
@@ -372,6 +446,9 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
     setDisplayLimit(40);
     setSelectedQuestionIds(new Set());
     syncTargetFolderDefaults(fid);
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setIsSidebarOpen(false);
+    }
   };
 
   const toggleExpandFolder = (fid: string) => {
@@ -381,6 +458,23 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
       else next.add(fid);
       return next;
     });
+  };
+
+  const parentFolderIdsWithChildren = useMemo(
+    () => folders.filter((f) => (childrenByParent.get(f.id)?.length ?? 0) > 0).map((f) => f.id),
+    [folders, childrenByParent]
+  );
+
+  const allParentsExpanded =
+    parentFolderIdsWithChildren.length > 0 &&
+    parentFolderIdsWithChildren.every((id) => expandedFolderIds.has(id));
+
+  const toggleExpandAllFolders = () => {
+    if (allParentsExpanded) {
+      setExpandedFolderIds(new Set());
+    } else {
+      setExpandedFolderIds(new Set(parentFolderIdsWithChildren));
+    }
   };
 
   const handleStartCreateFolder = (parentId: string | null) => {
@@ -451,7 +545,7 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
         void deleteCloudBankQuestion(qid).catch(() => {});
       }
       if (mode === 'moveToParent') {
-        void syncQuestionBankWithCloud().catch(() => {});
+        void syncQuestionBankWithCloud({ includeStarterBank: false }).catch(() => {});
       }
     }
     setNotice(
@@ -653,11 +747,30 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
     }
   };
 
+  const resolveThemePresetForItems = (
+    items: BankQuestionItem[]
+  ): boolean | 'math' | 'islamic' => {
+    if (items.length === 0) return false;
+    let mathCount = 0;
+    let islamicCount = 0;
+    for (const it of items) {
+      if (it.category === 'math') mathCount += 1;
+      else if (it.category === 'islamic') islamicCount += 1;
+    }
+    if (autoApplyMathTheme && mathCount > 0 && mathCount >= islamicCount) {
+      return 'math';
+    }
+    if (autoApplyIslamicTheme && islamicCount > 0 && islamicCount > mathCount) {
+      return 'islamic';
+    }
+    return false;
+  };
+
   const handleUseQuestionInVideo = async (
     item: BankQuestionItem,
     mode: 'append' | 'replace'
   ) => {
-    if (workingItemId) return;
+    if (workingItemId || batchConvertState) return;
     setWorkingItemId(item.id);
     setErrorNotice('');
     try {
@@ -678,15 +791,183 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
 
       await markBankQuestionsUsed([item.id], true);
       if (cloudUser) {
-        void updateCloudBankQuestionUsed(item.id, true).catch(() => {});
+        void updateCloudBankQuestionUsed(item.id, true, item).catch(() => {});
       }
       await loadAllData();
 
-      const applyMath = item.category === 'math' && autoApplyMathTheme;
-      onInsertSlides([slide], mode, withVoiceOnInsert, warningMsg, applyMath);
+      const themePreset = resolveThemePresetForItems([item]);
+      onInsertSlides([slide], mode, withVoiceOnInsert, warningMsg, themePreset);
       onClose();
     } finally {
       setWorkingItemId(null);
+    }
+  };
+
+  const handleBatchUseQuestionsInVideo = async (
+    itemsToConvert: BankQuestionItem[],
+    mode: 'append' | 'replace',
+    aspectRatioOverride?: '9:16' | '16:9'
+  ) => {
+    if (workingItemId || batchConvertState || itemsToConvert.length === 0) return;
+    batchConvertAbortRef.current = false;
+    setErrorNotice('');
+
+    try {
+      soundEngine.getContext();
+    } catch {
+      // ignore
+    }
+
+    const total = itemsToConvert.length;
+    setBatchConvertState({
+      current: 0,
+      total,
+      label: `جارٍ تجهيز ${total} شريحة للفيديو...`,
+    });
+
+    const convertedSlides: QuestionSlide[] = [];
+    const convertedItems: BankQuestionItem[] = [];
+    let firstWarning: string | undefined;
+
+    try {
+      for (let i = 0; i < itemsToConvert.length; i += 1) {
+        if (batchConvertAbortRef.current) break;
+        const item = itemsToConvert[i];
+        setBatchConvertState({
+          current: i + 1,
+          total,
+          label: withVoiceOnInsert
+            ? `توليد الصوت للشريحة ${i + 1} من ${total}...`
+            : `تجهيز الشريحة ${i + 1} من ${total}...`,
+        });
+
+        let slide = bankItemToQuestionSlide(item);
+        if (withVoiceOnInsert) {
+          const res = await generateSlideVoiceoverSafe(slide, voiceName, voiceModeOnInsert);
+          slide = res.slide;
+          if (!firstWarning && res.warning) {
+            firstWarning = res.warning;
+          }
+        }
+        convertedSlides.push(slide);
+        convertedItems.push(item);
+      }
+
+      if (convertedSlides.length > 0) {
+        const convertedIds = convertedItems.map((it) => it.id);
+        await markBankQuestionsUsed(convertedIds, true);
+        if (cloudUser) {
+          void updateCloudBankQuestionsUsedBatch(convertedIds, true, convertedItems).catch(
+            () => {}
+          );
+        }
+        setSelectedQuestionIds(new Set());
+        await loadAllData();
+
+        const themePreset = resolveThemePresetForItems(convertedItems);
+        onInsertSlides(
+          convertedSlides,
+          mode,
+          withVoiceOnInsert,
+          firstWarning,
+          themePreset,
+          aspectRatioOverride
+        );
+        onClose();
+      }
+    } finally {
+      setBatchConvertState(null);
+      batchConvertAbortRef.current = false;
+    }
+  };
+
+  const handleQuickBatchFiveUnused = async (mode: 'append' | 'replace' = 'replace') => {
+    const unusedPool = filteredItems.filter((i) => !i.usedInVideo);
+    if (unusedPool.length === 0) {
+      setErrorNotice('لا توجد أسئلة جديدة (غير منفّذة) ضمن المجلد والفلتر الحالي.');
+      return;
+    }
+    const batch = unusedPool.slice(0, Math.min(5, unusedPool.length));
+    await handleBatchUseQuestionsInVideo(batch, mode);
+  };
+
+  const handleQuickLongVideo16x9 = async () => {
+    const unusedPool = filteredItems.filter((i) => !i.usedInVideo);
+    if (unusedPool.length === 0) {
+      setErrorNotice('لا توجد أسئلة جديدة (غير منفّذة) ضمن المجلد والفلتر الحالي لإنشاء فيديو طويل.');
+      return;
+    }
+    const batch = unusedPool.slice(0, Math.min(15, unusedPool.length));
+    await handleBatchUseQuestionsInVideo(batch, 'replace', '16:9');
+  };
+
+  const [seriesPopoverOpen, setSeriesPopoverOpen] = useState(false);
+
+  const handleBuildBatchSeries = async (episodeCount: 3 | 5 | 7, perEpisode = 5) => {
+    if (workingItemId || batchConvertState) return;
+    const unusedPool = filteredItems.filter((i) => !i.usedInVideo);
+    if (unusedPool.length < episodeCount) {
+      setErrorNotice(
+        `يحتاج إنشاء ${episodeCount} حلقات على الأقل إلى ${episodeCount} سؤالاً غير منفّذ (المتوفر حالياً: ${unusedPool.length}).`
+      );
+      return;
+    }
+    setSeriesPopoverOpen(false);
+    setErrorNotice('');
+    setNotice('');
+
+    const totalPicked = Math.min(unusedPool.length, episodeCount * perEpisode);
+    const chunkSize = Math.max(1, Math.min(perEpisode, Math.floor(totalPicked / episodeCount)));
+    const episodesToSave: QuizProject[] = [];
+    const usedIds: string[] = [];
+    const usedItems: BankQuestionItem[] = [];
+    const baseTime = Date.now();
+    const seriesLabel =
+      selectedFolderId !== 'all' && selectedFolderId !== 'unfiled'
+        ? buildFolderBreadcrumb(selectedFolderId, folders).split('/').pop()?.trim() || 'سلسلة تحديات'
+        : 'سلسلة مسابقات';
+
+    for (let ep = 0; ep < episodeCount; ep++) {
+      const start = ep * chunkSize;
+      const chunk = unusedPool.slice(start, start + chunkSize);
+      if (chunk.length === 0) break;
+
+      const epSlides = chunk.map((it) => bankItemToQuestionSlide(it));
+      const themePreset = resolveThemePresetForItems(chunk);
+      const baseProj = createDefaultProject();
+      const epTemplate =
+        themePreset === true || themePreset === 'math'
+          ? applyChannelThemePreset(baseProj.template, 'channelMath')
+          : themePreset === 'islamic'
+            ? applyStudioThemePreset(baseProj.template, 'islamicAndalusian')
+            : baseProj.template;
+
+      episodesToSave.push({
+        ...baseProj,
+        id: `series-${baseTime}-${ep + 1}`,
+        name: `${seriesLabel} — حلقة ${ep + 1}`,
+        preferredAiVoice: voiceName,
+        slides: epSlides,
+        template: epTemplate,
+        updatedAt: baseTime + ep,
+      });
+
+      for (const it of chunk) {
+        usedIds.push(it.id);
+        usedItems.push(it);
+      }
+    }
+
+    if (episodesToSave.length > 0) {
+      await saveProjectsToLibraryBatch(episodesToSave);
+      await markBankQuestionsUsed(usedIds, true);
+      if (cloudUser) {
+        void updateCloudBankQuestionsUsedBatch(usedIds, true, usedItems).catch(() => {});
+      }
+      await loadAllData();
+      setNotice(
+        `تم إنشاء وحفظ ${episodesToSave.length} حلقات جاهزة (${usedIds.length} سؤالاً)! افتح زر «المشاريع» في الأعلى للتنقل بينها وتصديرها.`
+      );
     }
   };
 
@@ -739,11 +1020,12 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
   const handleBulkMoveSelected = async () => {
     if (selectedQuestionIds.size === 0) return;
     const ids = Array.from(selectedQuestionIds);
+    const movedItems = allQuestions.filter((q) => selectedQuestionIds.has(q.id));
     const targetFid = bulkMoveTargetFolderId || undefined;
     const fPath = targetFid ? buildFolderBreadcrumb(targetFid, folders) : undefined;
     await moveBankQuestionsToFolder(ids, targetFid, fPath);
     if (cloudUser) {
-      void updateCloudBankQuestionsFolder(ids, targetFid, fPath).catch(() => {});
+      void updateCloudBankQuestionsFolder(ids, targetFid, fPath, movedItems).catch(() => {});
     }
     setSelectedQuestionIds(new Set());
     await loadAllData();
@@ -753,33 +1035,70 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
   const handleBulkMarkUsedSelected = async (used: boolean) => {
     if (selectedQuestionIds.size === 0) return;
     const ids = Array.from(selectedQuestionIds);
+    const selectedItems = allQuestions.filter((q) => selectedQuestionIds.has(q.id));
     await markBankQuestionsUsed(ids, used);
     if (cloudUser) {
-      for (const id of ids) {
-        void updateCloudBankQuestionUsed(id, used).catch(() => {});
-      }
+      void updateCloudBankQuestionsUsedBatch(ids, used, selectedItems).catch(() => {});
     }
     setSelectedQuestionIds(new Set());
     await loadAllData();
   };
 
-  const handleCloudSync = async () => {
+  const handleCloudSync = async (includeStarterBank = false) => {
     if (isCloudSyncing) return;
+    if (!isOnline) {
+      setErrorNotice('أنت الآن في وضع عدم الاتصال بالإنترنت. ستعمل الذاكرة محلياً وتُزامَن عند عودة الاتصال.');
+      return;
+    }
     setIsCloudSyncing(true);
+    setSyncProgressText('');
     setErrorNotice('');
     setNotice('');
     try {
       const user = cloudUser ?? (await signInWithGoogleForSync());
       if (!user) return;
-      const res = await syncQuestionBankWithCloud();
+      const res = await syncQuestionBankWithCloud({
+        includeStarterBank,
+        onProgress: (txt) => setSyncProgressText(txt),
+      });
+      setCloudSyncMeta(getCloudSyncMeta());
       await loadAllData();
+      const skippedHint =
+        res.skippedStarterCount > 0
+          ? ` (تم توفير الحصة السحابية بتخطي ${res.skippedStarterCount} سؤال بداية غير معدّل)`
+          : '';
       setNotice(
-        `تمت مزامنة السحابة (${user.email || 'حسابك'}): استرجاع ${res.pulled} سؤال و${res.foldersPulled} مجلد، ورفع ${res.pushed} سؤال و${res.foldersPushed} مجلد.`
+        `تمت مزامنة السحابة (${user.email || 'حسابك'}): استرجاع ${res.pulled} سؤال و${res.foldersPulled} مجلد، ورفع ${res.pushed} سؤال و${res.foldersPushed} مجلد.${skippedHint}`
       );
     } catch (err) {
       setErrorNotice(err instanceof Error ? err.message : 'تعذر إتمام المزامنة مع السحابة.');
     } finally {
       setIsCloudSyncing(false);
+      setSyncProgressText('');
+    }
+  };
+
+  const handleLoadAllStarterBanks = async () => {
+    if (isSeedingStarter) return;
+    setIsSeedingStarter(true);
+    setErrorNotice('');
+    setNotice('');
+    try {
+      const res = await seedAllStarterBanksIfNeeded(true);
+      await loadAllData();
+      if (res.addedCount > 0) {
+        setNotice(
+          `تم تحميل +${res.addedCount} سؤالاً جديداً وتحديث المجلدات في الذاكرة بنجاح!`
+        );
+      } else {
+        setNotice('جميع بنوك البداية (+1,400 سؤال ومجلداتها الفرعية) محمّلة مسبقاً في ذاكرتك.');
+      }
+    } catch (err) {
+      setErrorNotice(
+        err instanceof Error ? err.message : 'تعذر تحميل بنوك الأسئلة المدمجة.'
+      );
+    } finally {
+      setIsSeedingStarter(false);
     }
   };
 
@@ -825,7 +1144,7 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
         addedCount = res.insertedFromCloud;
       }
       if (cloudUser && (importedFolders.length > 0 || addedCount > 0)) {
-        void syncQuestionBankWithCloud().catch(() => {});
+        void syncQuestionBankWithCloud({ includeStarterBank: false }).catch(() => {});
       }
       await loadAllData();
       setNotice(`تم استيراد ${addedCount} سؤالاً جديداً و ${importedFolders.length} مجلداً للذاكرة.`);
@@ -1060,17 +1379,44 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 flex-wrap">
+            {!isOnline && (
+              <span className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-400 text-[10px] font-bold">
+                <WifiOff className="w-3 h-3" />
+                <span>بدون اتصال</span>
+              </span>
+            )}
+
             {/* Cloud Sync Status */}
             {cloudUser ? (
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  disabled={isCloudSyncing}
-                  onClick={() => void handleCloudSync()}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050]/15 border border-[#00B050]/45 text-[#00B050] dark:text-[#6ee7b7] text-[11px] font-bold cursor-pointer"
+                  disabled={isCloudSyncing || !isOnline}
+                  onClick={() => void handleCloudSync(false)}
+                  title={
+                    cloudSyncMeta
+                      ? `آخر مزامنة: ${new Date(cloudSyncMeta.lastSyncedAt).toLocaleTimeString('ar-EG', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}`
+                      : 'مزامنة سريعة مع السحابة'
+                  }
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050]/15 border border-[#00B050]/45 text-[#00B050] dark:text-[#6ee7b7] text-[11px] font-bold cursor-pointer disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isCloudSyncing ? 'animate-spin' : ''}`} />
-                  <span className="hidden md:inline">مزامنة السحابة</span>
+                  <span className="hidden md:inline">
+                    {isCloudSyncing && syncProgressText ? syncProgressText : 'مزامنة سريعة'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isCloudSyncing || !isOnline}
+                  onClick={() => void handleCloudSync(true)}
+                  title="نسخ كل أسئلة الذاكرة (+1400 سؤال) للسحابة بالكامل"
+                  className="hidden sm:flex items-center gap-1 px-2 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[#00B050] text-[var(--pmuted)] hover:text-[#00B050] text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                >
+                  <Cloud className="w-3 h-3" />
+                  <span>رفع الكل</span>
                 </button>
                 <button
                   type="button"
@@ -1093,9 +1439,9 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
             ) : (
               <button
                 type="button"
-                disabled={isCloudSyncing}
-                onClick={() => void handleCloudSync()}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[#00B050]/45 text-[#00B050] text-[11px] font-bold cursor-pointer"
+                disabled={isCloudSyncing || !isOnline}
+                onClick={() => void handleCloudSync(false)}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[#00B050]/45 text-[#00B050] text-[11px] font-bold cursor-pointer disabled:opacity-50"
               >
                 <Cloud className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">مزامنة Firebase</span>
@@ -1130,12 +1476,67 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
 
             <button
               type="button"
+              onClick={() => void handleQuickBatchFiveUnused('replace')}
+              disabled={Boolean(workingItemId) || Boolean(batchConvertState)}
+              title="إنشاء فيديو قصير 9:16 من أول 5 أسئلة غير مستخدمة"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[var(--gold)] hover:brightness-105 disabled:opacity-50 text-black text-[11px] font-extrabold cursor-pointer"
+            >
+              <Film className="w-3.5 h-3.5" />
+              <span>شورتس (5)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleQuickLongVideo16x9()}
+              disabled={Boolean(workingItemId) || Boolean(batchConvertState)}
+              title="تجميع حتى 15 سؤالاً غير مستخدم في فيديو يوتيوب أفقي طويل 16:9"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--gold)]/60 hover:border-[var(--gold)] disabled:opacity-50 text-[var(--gold)] text-[11px] font-extrabold cursor-pointer"
+            >
+              <Film className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">فيديو طويل 16:9</span>
+            </button>
+
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setSeriesPopoverOpen((o) => !o)}
+                disabled={Boolean(workingItemId) || Boolean(batchConvertState)}
+                title="تقسيم الأسئلة الجديدة تلقائياً إلى عدة حلقات محفوظة بالمشاريع"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[#00B050]/50 hover:border-[#00B050] disabled:opacity-50 text-[#00B050] dark:text-[#6ee7b7] text-[11px] font-bold cursor-pointer"
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">سلسلة حلقات</span>
+              </button>
+              {seriesPopoverOpen && (
+                <div className="absolute left-0 top-9 z-40 w-52 p-2 rounded-xl bg-[var(--panel)] border border-[var(--pline)] shadow-2xl flex flex-col gap-1">
+                  <span className="text-[10px] font-bold text-[var(--pmuted)] px-1 pb-1 border-b border-[var(--pline)]">
+                    تجهيز مشاريع سلسلة للأسبوع (5 أسئلة/حلقة):
+                  </span>
+                  {([3, 5, 7] as const).map((cnt) => (
+                    <button
+                      key={cnt}
+                      type="button"
+                      onClick={() => void handleBuildBatchSeries(cnt, 5)}
+                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-[var(--surface)] text-xs font-bold text-[var(--ptxt)] cursor-pointer"
+                    >
+                      <span>إنشاء {cnt} حلقات متتالية</span>
+                      <span className="text-[10px] font-mono-nums text-[#00B050]">
+                        ≤{cnt * 5} سؤال
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
               onClick={() => void handlePickRandomUnused()}
-              disabled={Boolean(workingItemId)}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[11px] font-bold cursor-pointer"
+              disabled={Boolean(workingItemId) || Boolean(batchConvertState)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] disabled:opacity-50 text-white text-[11px] font-bold cursor-pointer"
             >
               <Shuffle className="w-3.5 h-3.5" />
-              <span>سحب عشوائي للفيديو</span>
+              <span className="hidden sm:inline">عشوائي</span>
             </button>
 
             <button
@@ -1154,19 +1555,35 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
           {/* Collapsible Nested Folder Tree Sidebar */}
           {isSidebarOpen && (
             <aside className="w-full lg:w-72 xl:w-80 max-h-[34dvh] lg:max-h-none border-b lg:border-b-0 lg:border-l border-[var(--pline)] bg-[var(--surface)] flex flex-col min-h-0 shrink-0">
-              <div className="flex items-center justify-between gap-2 px-3 py-2.5 border-b border-[var(--pline)] shrink-0">
-                <div className="flex items-center gap-1.5 text-xs font-extrabold">
-                  <FolderTree className="w-4 h-4 text-[#00B050]" />
-                  <span>أقسام ومجلدات الذاكرة</span>
+              <div className="flex items-center justify-between gap-1.5 px-3 py-2.5 border-b border-[var(--pline)] shrink-0">
+                <div className="flex items-center gap-1.5 text-xs font-extrabold min-w-0">
+                  <FolderTree className="w-4 h-4 text-[#00B050] shrink-0" />
+                  <span className="truncate">أقسام الذاكرة</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => handleStartCreateFolder(null)}
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[10px] font-bold cursor-pointer"
-                >
-                  <FolderPlus className="w-3 h-3" />
-                  <span>مجلد رئيسي</span>
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  {parentFolderIdsWithChildren.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleExpandAllFolders}
+                      title={allParentsExpanded ? 'طي كل المجلدات' : 'توسيع كل المجلدات'}
+                      className="p-1 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[#00B050] text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
+                    >
+                      {allParentsExpanded ? (
+                        <ChevronsDownUp className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronsUpDown className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleStartCreateFolder(null)}
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[10px] font-bold cursor-pointer"
+                  >
+                    <FolderPlus className="w-3 h-3" />
+                    <span>مجلد رئيسي</span>
+                  </button>
+                </div>
               </div>
 
               <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1">
@@ -1300,20 +1717,59 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                 <div className="flex flex-col gap-0.5">{renderFolderTreeNodes(null, 0)}</div>
               </div>
 
-              <label className="px-3 py-2 border-t border-[var(--pline)] flex items-center gap-2 text-[11px] font-semibold cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  checked={includeSubfolders}
-                  onChange={(e) => setIncludeSubfolders(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-[#00B050] rounded"
-                />
-                <span>عرض أسئلة المجلدات الفرعية أيضاً</span>
-              </label>
+              <div className="px-3 py-2 border-t border-[var(--pline)] flex flex-col gap-2 shrink-0">
+                <label className="flex items-center gap-2 text-[11px] font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeSubfolders}
+                    onChange={(e) => setIncludeSubfolders(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-[#00B050] rounded"
+                  />
+                  <span>عرض أسئلة المجلدات الفرعية أيضاً</span>
+                </label>
+                <button
+                  type="button"
+                  disabled={isSeedingStarter}
+                  onClick={() => void handleLoadAllStarterBanks()}
+                  className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#00B050]/12 hover:bg-[#00B050]/20 border border-[#00B050]/40 text-[#00B050] dark:text-[#6ee7b7] text-[11px] font-bold cursor-pointer disabled:opacity-60"
+                >
+                  {isSeedingStarter ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <span>📚</span>
+                  )}
+                  <span>تعبئة كل بنوك البداية (+1400 سؤال)</span>
+                </button>
+              </div>
             </aside>
           )}
 
           {/* Main Questions & Creators Column */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+            {/* Compact Active Folder Strip when Sidebar is Collapsed */}
+            {!isSidebarOpen && (
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-[var(--pline)] bg-[var(--surface)] shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarOpen(true)}
+                  className="flex items-center gap-1.5 min-w-0 text-xs font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer"
+                >
+                  <FolderOpen className="w-4 h-4 shrink-0" />
+                  <span className="truncate">{activeBreadcrumb}</span>
+                  <span className="text-[10px] font-mono-nums text-[var(--pmuted)] shrink-0">
+                    ({filteredItems.length})
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarOpen(true)}
+                  className="px-2.5 py-1 rounded-lg bg-[var(--panel)] border border-[#00B050]/40 text-[11px] font-bold text-[#00B050] shrink-0 cursor-pointer"
+                >
+                  تغيير المجلد
+                </button>
+              </div>
+            )}
+
             {/* Toolbar: Search + Filters + Creator Toggle Buttons */}
             <div className="p-3 sm:p-4 border-b border-[var(--pline)] bg-[var(--panel)] flex flex-col gap-2.5 shrink-0">
               {/* Row 1: Creator Mode Toggles + Voiceover option */}
@@ -1473,6 +1929,30 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
 
             {/* Scrollable Workspace Content */}
             <div className="flex-1 overflow-y-auto p-3 sm:p-4 flex flex-col gap-3">
+              {/* Live Batch Video Conversion Banner */}
+              {batchConvertState && (
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-[var(--gold)]/15 border border-[var(--gold)]/55 text-xs">
+                  <div className="flex items-center gap-2 font-bold text-[var(--gold)]">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>{batchConvertState.label}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono-nums font-extrabold">
+                      {batchConvertState.current} / {batchConvertState.total}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        batchConvertAbortRef.current = true;
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-[10px] font-bold cursor-pointer"
+                    >
+                      إيقاف وإدراج الجاهز
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Notices */}
               {notice && (
                 <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#00B050]/12 border border-[#00B050]/40 text-xs text-[#00B050] dark:text-[#6ee7b7]">
@@ -1918,13 +2398,42 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                 </div>
               )}
 
-              {/* Bulk Selection / Move Bar */}
+              {/* Bulk Selection / Batch Video / Move Bar */}
               {selectedQuestionIds.size > 0 && (
                 <div className="sticky top-0 z-10 p-2.5 rounded-xl bg-[var(--panel)] border border-[#00B050] shadow-lg flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-extrabold text-[#00B050] dark:text-[#6ee7b7]">
                     محدد: {selectedQuestionIds.size} سؤال
                   </span>
                   <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={Boolean(batchConvertState) || Boolean(workingItemId)}
+                      onClick={() => {
+                        const selected = filteredItems.filter((q) =>
+                          selectedQuestionIds.has(q.id)
+                        );
+                        void handleBatchUseQuestionsInVideo(selected, 'append');
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#00B050] hover:bg-[#00c85b] disabled:opacity-50 text-white text-[11px] font-bold cursor-pointer"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                      <span>إضافة المحدد للفيديو</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(batchConvertState) || Boolean(workingItemId)}
+                      onClick={() => {
+                        const selected = filteredItems.filter((q) =>
+                          selectedQuestionIds.has(q.id)
+                        );
+                        void handleBatchUseQuestionsInVideo(selected, 'replace');
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--gold)] hover:brightness-105 disabled:opacity-50 text-black text-[11px] font-extrabold cursor-pointer"
+                    >
+                      <Film className="w-3 h-3" />
+                      <span>فيديو جديد بالمحدد</span>
+                    </button>
+
                     <select
                       value={bulkMoveTargetFolderId}
                       onChange={(e) => setBulkMoveTargetFolderId(e.target.value)}
@@ -1940,7 +2449,7 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                     <button
                       type="button"
                       onClick={() => void handleBulkMoveSelected()}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#00B050] text-white text-[11px] font-bold cursor-pointer"
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--surface)] border border-[#00B050]/50 text-[#00B050] text-[11px] font-bold cursor-pointer"
                     >
                       <FolderInput className="w-3.5 h-3.5" />
                       <span>نقل المحدد</span>
@@ -1963,7 +2472,7 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                 </div>
               )}
 
-              {/* Selection Helper + Math Theme Option */}
+              {/* Selection Helper + Auto Theme Options */}
               {visibleItems.length > 0 && (
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--pmuted)]">
                   <div className="flex items-center gap-2">
@@ -1978,26 +2487,44 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                       }}
                       className="px-2 py-1 rounded-md bg-[var(--surface)] border border-[var(--pline)] hover:border-[#00B050] font-bold text-[var(--ptxt)] cursor-pointer"
                     >
-                      {allVisibleSelected ? 'إلغاء تحديد الظاهر' : 'تحديد الظاهر للنقل'}
+                      {allVisibleSelected ? 'إلغاء تحديد الظاهر' : 'تحديد الظاهر للفيديو أو النقل'}
                     </button>
                     <span>
                       عرض {visibleItems.length} من أصل {filteredItems.length} سؤال
                     </span>
                   </div>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={autoApplyMathTheme}
-                      onChange={(e) => setAutoApplyMathTheme(e.target.checked)}
-                      className="w-3.5 h-3.5 accent-[#00B050]"
-                    />
-                    <span>تطبيق سبورة الرياضيات تلقائياً لأسئلة الرياضيات</span>
-                  </label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoApplyMathTheme}
+                        onChange={(e) => setAutoApplyMathTheme(e.target.checked)}
+                        className="w-3.5 h-3.5 accent-[#00B050]"
+                      />
+                      <span>قالب الرياضيات تلقائياً</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoApplyIslamicTheme}
+                        onChange={(e) => setAutoApplyIslamicTheme(e.target.checked)}
+                        className="w-3.5 h-3.5 accent-[#00B050]"
+                      />
+                      <span>قالب الإسلاميات تلقائياً</span>
+                    </label>
+                  </div>
                 </div>
               )}
 
               {/* Questions Grid */}
-              {filteredItems.length === 0 ? (
+              {isSeedingStarter && filteredItems.length === 0 ? (
+                <div className="flex-1 min-h-[220px] flex flex-col items-center justify-center text-center gap-3 p-6 rounded-2xl bg-[var(--surface)] border border-dashed border-[#00B050]/50">
+                  <Loader2 className="w-9 h-9 text-[#00B050] animate-spin" />
+                  <span className="text-sm font-bold text-[var(--ptxt)]">
+                    جارٍ تحميل وتجهيز +1,400 سؤال في المجلدات الفرعية...
+                  </span>
+                </div>
+              ) : filteredItems.length === 0 ? (
                 <div className="flex-1 min-h-[220px] flex flex-col items-center justify-center text-center gap-3 p-6 rounded-2xl bg-[var(--surface)] border border-dashed border-[var(--pline)]">
                   <Brain className="w-10 h-10 text-[var(--pmuted)] opacity-60" />
                   <div className="flex flex-col gap-1 max-w-md">
@@ -2005,10 +2532,18 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                       لا توجد أسئلة مطابقة هنا بعد
                     </span>
                     <span className="text-xs text-[var(--pmuted)] leading-relaxed">
-                      يمكنك إضافة سؤال يدوياً، أو لصق قائمة كاملة، أو توليد دفعة ذكاء لهذا المجلد في أي وقت.
+                      يمكنك إضافة سؤال يدوياً، أو لصق قائمة كاملة، أو تعبئة بنوك البداية المتنوعة (+1,400 سؤال)، أو توليد دفعة ذكاء لهذا المجلد في أي وقت.
                     </span>
                   </div>
                   <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isSeedingStarter}
+                      onClick={() => void handleLoadAllStarterBanks()}
+                      className="px-3.5 py-2 rounded-xl bg-[#00B050]/15 border border-[#00B050]/45 text-[#00B050] dark:text-[#6ee7b7] text-xs font-bold cursor-pointer"
+                    >
+                      📚 تعبئة كل بنوك البداية (+1400 سؤال)
+                    </button>
                     <button
                       type="button"
                       onClick={() => setCreatorDrawer('manual')}
@@ -2081,7 +2616,9 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                               const nextUsed = !item.usedInVideo;
                               void markBankQuestionsUsed([item.id], nextUsed).then(() => {
                                 if (cloudUser) {
-                                  void updateCloudBankQuestionUsed(item.id, nextUsed).catch(() => {});
+                                  void updateCloudBankQuestionUsed(item.id, nextUsed, item).catch(
+                                    () => {}
+                                  );
                                 }
                                 return loadAllData();
                               });
@@ -2279,15 +2816,15 @@ export const QuestionBankVaultModal: React.FC<QuestionBankVaultModalProps> = ({
                               <div className="flex items-center gap-1.5">
                                 <button
                                   type="button"
-                                  disabled={Boolean(workingItemId)}
+                                  disabled={Boolean(workingItemId) || Boolean(batchConvertState)}
                                   onClick={() => void handleUseQuestionInVideo(item, 'replace')}
-                                  className="px-2.5 py-1 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[var(--gold)] text-[10px] font-bold cursor-pointer"
+                                  className="px-2.5 py-1 rounded-lg bg-[var(--panel)] border border-[var(--pline)] hover:border-[var(--gold)] disabled:opacity-50 text-[10px] font-bold cursor-pointer"
                                 >
                                   بدء فيديو جديد
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={Boolean(workingItemId)}
+                                  disabled={Boolean(workingItemId) || Boolean(batchConvertState)}
                                   onClick={() => void handleUseQuestionInVideo(item, 'append')}
                                   className="flex items-center gap-1 px-3 py-1 rounded-lg bg-[#00B050] hover:bg-[#00c85b] disabled:opacity-50 text-white text-[10px] font-bold cursor-pointer"
                                 >

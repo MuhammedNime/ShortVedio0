@@ -175,6 +175,10 @@ export type PresetId =
   | 'ramadanLantern'
   | 'crimsonArena'
   | 'mintEditorial'
+  | 'islamicAndalusian'
+  | 'cosmicSpace'
+  | 'stadiumArena'
+  | 'ancientHistory'
   | 'emerald'
   | 'navy'
   | 'obsidian';
@@ -545,6 +549,34 @@ export const PRESET_BACKDROPS: PresetBackdropInfo[] = [
     swatchColor: '#d2efe0',
   },
   {
+    id: 'islamicAndalusian',
+    label: 'أندلسي وفوانيس 🕌',
+    src: withBasePath('src/assets/images/backdrop_islamic_vert_1795621389166.jpg'),
+    wideSrc: withBasePath('src/assets/images/backdrop_islamic_wide_1795621389546.jpg'),
+    swatchColor: '#0e3a38',
+  },
+  {
+    id: 'cosmicSpace',
+    label: 'مجرة الفضاء العميق 🌌',
+    src: withBasePath('src/assets/images/backdrop_space_vert_1795621389909.jpg'),
+    wideSrc: withBasePath('src/assets/images/backdrop_space_wide_1795621390941.jpg'),
+    swatchColor: '#0c1330',
+  },
+  {
+    id: 'stadiumArena',
+    label: 'ملعب الأبطال ⚽',
+    src: withBasePath('src/assets/images/backdrop_stadium_vert_1795621390645.jpg'),
+    wideSrc: withBasePath('src/assets/images/backdrop_stadium_wide_1795621390744.jpg'),
+    swatchColor: '#0d2638',
+  },
+  {
+    id: 'ancientHistory',
+    label: 'كنوز التاريخ 📜',
+    src: withBasePath('src/assets/images/backdrop_history_vert_1795621392312.jpg'),
+    wideSrc: withBasePath('src/assets/images/backdrop_history_wide_1795621392014.jpg'),
+    swatchColor: '#3b2814',
+  },
+  {
     id: 'emerald',
     label: 'الزمرد الذهبي',
     src: withBasePath('src/assets/images/template_emerald_studio_1795289851480.jpg'),
@@ -636,6 +668,10 @@ export const STUDIO_THEME_ORDER: PresetId[] = [
   'ramadanLantern',
   'crimsonArena',
   'mintEditorial',
+  'islamicAndalusian',
+  'cosmicSpace',
+  'stadiumArena',
+  'ancientHistory',
 ];
 
 export function getCanvasDimensions(template?: Pick<TemplateSettings, 'aspectRatio'>): {
@@ -1200,6 +1236,158 @@ function applyStudioThemePresetInternal(
       timerMatchBackground: true,
       timerBgColor: '#065f46',
       timerColor: '#064e3b',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'islamicAndalusian') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'islamicAndalusian',
+      bgDimOpacity: 0.22,
+      bgMotion: 'zoomAndParticles',
+      fontFamily: 'Amiri',
+      boxStyle: 'layeredCard',
+      borderStyle: 'gradientGold',
+      shadowIntensity: 1.2,
+      glowIntensity: 0.3,
+      boxGloss: false,
+      enhanceAppearance: true,
+      questionTextColor: '#FEF3C7',
+      questionBoxColor: '#0a2b29',
+      questionBoxOpacity: 0.92,
+      questionBorderColor: '#eab308',
+      questionBorderWidth: 4,
+      questionBorderRadius: 34,
+      optionTextColor: '#FEF3C7',
+      optionBoxColor: '#0e3633',
+      optionBoxOpacity: 0.92,
+      optionBorderColor: '#d4a73a',
+      optionBorderWidth: 4,
+      optionBorderRadius: 26,
+      optionLabelBgColor: '#eab308',
+      optionLabelTextColor: '#081e1c',
+      correctColor: '#10b981',
+      wrongColor: '#ef4444',
+      revealStyle: 'highlightGlow',
+      timerMatchBackground: true,
+      timerBgColor: '#0a2b29',
+      timerColor: '#FDE68A',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'cosmicSpace') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'cosmicSpace',
+      bgDimOpacity: 0.2,
+      bgMotion: 'zoomAndParticles',
+      fontFamily: 'Cairo',
+      boxStyle: 'glass',
+      borderStyle: 'gradientNeon',
+      shadowIntensity: 1.2,
+      glowIntensity: 0.55,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#F8FAFC',
+      questionBoxColor: '#0c1538',
+      questionBoxOpacity: 0.86,
+      questionBorderColor: '#38bdf8',
+      questionBorderWidth: 4,
+      questionBorderRadius: 34,
+      optionTextColor: '#F8FAFC',
+      optionBoxColor: '#111d4a',
+      optionBoxOpacity: 0.86,
+      optionBorderColor: '#a855f7',
+      optionBorderWidth: 4,
+      optionBorderRadius: 26,
+      optionLabelBgColor: '#38bdf8',
+      optionLabelTextColor: '#050b24',
+      correctColor: '#10b981',
+      wrongColor: '#f43f5e',
+      revealStyle: 'scaleCheck',
+      timerMatchBackground: true,
+      timerBgColor: '#0c1538',
+      timerColor: '#7dd3fc',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'stadiumArena') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'stadiumArena',
+      bgDimOpacity: 0.24,
+      bgMotion: 'zoomAndParticles',
+      fontFamily: 'Cairo',
+      boxStyle: 'chamfer',
+      borderStyle: 'cornerBrackets',
+      shadowIntensity: 1.25,
+      glowIntensity: 0.4,
+      boxGloss: true,
+      enhanceAppearance: true,
+      questionTextColor: '#FFFFFF',
+      questionBoxColor: '#091f2c',
+      questionBoxOpacity: 0.92,
+      questionBorderColor: '#22c55e',
+      questionBorderWidth: 4,
+      questionBorderRadius: 20,
+      optionTextColor: '#FFFFFF',
+      optionBoxColor: '#0e2b3c',
+      optionBoxOpacity: 0.92,
+      optionBorderColor: '#38bdf8',
+      optionBorderWidth: 4,
+      optionBorderRadius: 18,
+      optionLabelBgColor: '#22c55e',
+      optionLabelTextColor: '#041410',
+      correctColor: '#16a34a',
+      wrongColor: '#ef4444',
+      revealStyle: 'redWrongGreenCorrect',
+      timerMatchBackground: true,
+      timerBgColor: '#091f2c',
+      timerColor: '#86efac',
+      showPrizeLadder: false,
+    };
+  }
+
+  if (presetId === 'ancientHistory') {
+    return {
+      ...current,
+      backgroundType: 'preset',
+      presetId: 'ancientHistory',
+      bgDimOpacity: 0.22,
+      bgMotion: 'slowZoom',
+      fontFamily: 'Amiri',
+      boxStyle: 'inset',
+      borderStyle: 'double',
+      shadowIntensity: 1.1,
+      glowIntensity: 0.15,
+      boxGloss: false,
+      enhanceAppearance: true,
+      questionTextColor: '#291a0a',
+      questionBoxColor: '#f5e7c4',
+      questionBoxOpacity: 0.95,
+      questionBorderColor: '#a16207',
+      questionBorderWidth: 5,
+      questionBorderRadius: 28,
+      optionTextColor: '#291a0a',
+      optionBoxColor: '#f3e2b8',
+      optionBoxOpacity: 0.95,
+      optionBorderColor: '#a16207',
+      optionBorderWidth: 4,
+      optionBorderRadius: 24,
+      optionLabelBgColor: '#a16207',
+      optionLabelTextColor: '#FFFFFF',
+      correctColor: '#15803d',
+      wrongColor: '#b91c1c',
+      revealStyle: 'dimOthers',
+      timerMatchBackground: true,
+      timerBgColor: '#3b2814',
+      timerColor: '#FEF3C7',
       showPrizeLadder: false,
     };
   }

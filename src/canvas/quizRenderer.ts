@@ -856,7 +856,7 @@ export async function ensureQuizFontsLoaded(primaryFont = 'Cairo'): Promise<void
   wrapCache.clear();
 }
 
-function wrapArabicText(
+export function wrapArabicText(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number
@@ -1346,7 +1346,12 @@ function drawAmbientParticles(
   W: number,
   H: number
 ): void {
-  const isNeon = template.presetId === 'neonCyber' || template.borderStyle === 'gradientNeon';
+  const isNeon =
+    template.presetId === 'neonCyber' ||
+    template.presetId === 'cosmicSpace' ||
+    template.borderStyle === 'gradientNeon';
+  const isSpace = template.presetId === 'cosmicSpace';
+  const isStadium = template.presetId === 'stadiumArena';
   const isCyan = template.presetId === 'arcticCyan';
   const isSunset = template.presetId === 'sunsetCinema' || template.presetId === 'crimsonArena';
   const isGold =
@@ -1356,38 +1361,57 @@ function drawAmbientParticles(
     template.presetId === 'parchmentGold' ||
     template.presetId === 'royalPurple' ||
     template.presetId === 'ramadanLantern' ||
+    template.presetId === 'islamicAndalusian' ||
+    template.presetId === 'ancientHistory' ||
     template.borderStyle === 'gradientGold';
 
   ctx.save();
-  const count = 24;
+  const count = isSpace || isStadium ? 32 : 24;
   for (let i = 0; i < count; i++) {
     const seedX = ((i * 197 + 43) % 100) / 100;
     const seedY = ((i * 313 + 71) % 100) / 100;
-    const speedY = 0.025 + (i % 5) * 0.008;
+    const speedY = isStadium ? 0.045 + (i % 5) * 0.01 : 0.025 + (i % 5) * 0.008;
     const sway = Math.sin(globalTime * (0.6 + (i % 4) * 0.2) + i) * 26;
     const x = seedX * W + sway;
     const y = (((seedY - globalTime * speedY) % 1) + 1) % 1 * H;
     const radius = 3 + (i % 4) * 2.5;
-    const alpha = 0.16 + 0.22 * (0.5 + 0.5 * Math.sin(globalTime * 1.8 + i * 1.3));
+    const alpha = 0.18 + 0.26 * (0.5 + 0.5 * Math.sin(globalTime * 2.1 + i * 1.3));
 
-    const color = isNeon
+    const color = isStadium
       ? i % 2 === 0
-        ? `rgba(34, 211, 238, ${alpha.toFixed(3)})`
-        : `rgba(236, 72, 153, ${alpha.toFixed(3)})`
-      : isCyan
-        ? `rgba(186, 230, 253, ${alpha.toFixed(3)})`
-        : isSunset
-          ? i % 2 === 0
-            ? `rgba(251, 146, 60, ${alpha.toFixed(3)})`
-            : `rgba(244, 63, 94, ${alpha.toFixed(3)})`
-          : isGold
-            ? `rgba(237, 214, 162, ${alpha.toFixed(3)})`
-            : `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+        ? `rgba(74, 222, 128, ${alpha.toFixed(3)})`
+        : `rgba(255, 255, 255, ${(alpha * 0.9).toFixed(3)})`
+      : isNeon
+        ? i % 2 === 0
+          ? `rgba(56, 189, 248, ${alpha.toFixed(3)})`
+          : `rgba(192, 132, 252, ${alpha.toFixed(3)})`
+        : isCyan
+          ? `rgba(186, 230, 253, ${alpha.toFixed(3)})`
+          : isSunset
+            ? i % 2 === 0
+              ? `rgba(251, 146, 60, ${alpha.toFixed(3)})`
+              : `rgba(244, 63, 94, ${alpha.toFixed(3)})`
+            : isGold
+              ? `rgba(251, 211, 141, ${alpha.toFixed(3)})`
+              : `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
 
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
+
+    // Subtle crisp 4-point star glint on space/islamic/stadium hero motes
+    if ((isSpace || isStadium || template.presetId === 'islamicAndalusian') && i % 5 === 0) {
+      const glintLen = radius * 2.8;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(x - glintLen, y);
+      ctx.lineTo(x + glintLen, y);
+      ctx.moveTo(x, y - glintLen);
+      ctx.lineTo(x, y + glintLen);
+      ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -3099,28 +3123,77 @@ export function renderQuizFrame(
     if (hasCta) {
       const ctaY = startY + (lines.length - 1) * lineH + 135;
       const ctaScale = 1 + 0.032 * Math.sin(endElapsed * 5);
-      const ctaW = Math.min(endCardW - 72, isWide ? 680 : 720);
-      const ctaH = 82;
+      const ctaW = Math.min(endCardW - 72, isWide ? 700 : 740);
+      const ctaH = 84;
       const defaultScoreCta =
         slides.length > 1
-          ? `كم إجابة صحيحة جبت من ${slides.length}؟ اكتب نتيجتك واشترك 👇`
-          : 'اشترك في القناة · اكتب إجابتك في التعليقات 👇';
+          ? `كم إجابة صحيحة جبت من ${slides.length}؟ اكتب نتيجتك واشترك`
+          : 'اشترك في القناة · فعّل الجرس واكتب إجابتك';
       const ctaLabel = (template.endCtaText || '').trim() || defaultScoreCta;
 
       ctx.save();
       ctx.translate(0, ctaY);
       ctx.scale(ctaScale, ctaScale);
       drawRoundedRect(ctx, -ctaW / 2, -ctaH / 2, ctaW, ctaH, 24);
-      ctx.fillStyle = '#DC2626';
+      const ctaGrad = ctx.createLinearGradient(-ctaW / 2, -ctaH / 2, ctaW / 2, ctaH / 2);
+      ctaGrad.addColorStop(0, '#dc2626');
+      ctaGrad.addColorStop(1, '#b91c1c');
+      ctx.fillStyle = ctaGrad;
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+
+      // Animated light sweep across CTA button
+      ctx.save();
+      drawRoundedRect(ctx, -ctaW / 2, -ctaH / 2, ctaW, ctaH, 24);
+      ctx.clip();
+      const ctaSweep = ((endElapsed * 0.85) % 1.6) - 0.3;
+      const beamX = -ctaW / 2 + ctaW * ctaSweep;
+      const shineGrad = ctx.createLinearGradient(beamX - 70, -ctaH / 2, beamX + 70, ctaH / 2);
+      shineGrad.addColorStop(0, 'rgba(255,255,255,0)');
+      shineGrad.addColorStop(0.5, 'rgba(255,255,255,0.28)');
+      shineGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = shineGrad;
+      ctx.fillRect(-ctaW / 2, -ctaH / 2, ctaW, ctaH);
+      ctx.restore();
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
       ctx.lineWidth = 3;
       ctx.stroke();
 
-      let ctaFont = isWide ? 31 : 32;
+      // Left bell badge & right play triangle icon inside CTA pill
+      const iconEdge = ctaW / 2 - 42;
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.beginPath();
+      ctx.arc(iconEdge, 0, 22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(iconEdge - 5, -9);
+      ctx.lineTo(iconEdge + 10, 0);
+      ctx.lineTo(iconEdge - 5, 9);
+      ctx.closePath();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fill();
+
+      // Crisp bell icon on opposite side with gentle wiggle
+      const bellWiggle = Math.sin(endElapsed * 9) * 0.14;
+      ctx.save();
+      ctx.translate(-iconEdge, 0);
+      ctx.rotate(bellWiggle);
+      ctx.fillStyle = '#FACC15';
+      ctx.beginPath();
+      ctx.arc(0, -3, 9, Math.PI, 0);
+      ctx.lineTo(12, 8);
+      ctx.lineTo(-12, 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(0, 11, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      let ctaFont = isWide ? 29 : 30;
       ctx.direction = 'rtl';
       ctx.font = `800 ${ctaFont}px ${fontStack}`;
-      while (ctaFont > 19 && ctx.measureText(ctaLabel).width > ctaW - 44) {
+      while (ctaFont > 18 && ctx.measureText(ctaLabel).width > ctaW - 140) {
         ctaFont -= 2;
         ctx.font = `800 ${ctaFont}px ${fontStack}`;
       }
@@ -3693,6 +3766,40 @@ export function renderQuizFrame(
         drawFill: true,
         drawBorder: template.optionBorderWidth > 0 || isSpokenHighlight || isVersus || boxStyle === 'minimalOutline',
       });
+
+      // Enhanced VS duel inner contrast gradient (warm gold side vs cool sky blue side)
+      if (isVersus && !isRevealed) {
+        ctx.save();
+        traceBoxPath(ctx, -boxW / 2, -boxH / 2, boxW, boxH, template.optionBorderRadius, boxStyle);
+        ctx.clip();
+        const duelTint = ctx.createLinearGradient(-boxW / 2, -boxH / 2, boxW / 2, boxH / 2);
+        duelTint.addColorStop(0, i === 0 ? 'rgba(245, 158, 11, 0.24)' : 'rgba(56, 189, 248, 0.24)');
+        duelTint.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = duelTint;
+        ctx.fillRect(-boxW / 2, -boxH / 2, boxW, boxH);
+        ctx.restore();
+      }
+
+      // Broadcast Shimmer Sweep across revealed correct box
+      if (isRevealed && isCorrect && revealElapsed >= 0 && revealElapsed < 1.25) {
+        ctx.save();
+        traceBoxPath(ctx, -boxW / 2, -boxH / 2, boxW, boxH, template.optionBorderRadius, boxStyle);
+        ctx.clip();
+        const sweepT = clamp01(revealElapsed / 0.85);
+        const shimmerCenterX = -boxW / 2 - 120 + (boxW + 240) * easeOutCubic(sweepT);
+        const shimmerGrad = ctx.createLinearGradient(
+          shimmerCenterX - 95,
+          -boxH / 2,
+          shimmerCenterX + 95,
+          boxH / 2
+        );
+        shimmerGrad.addColorStop(0, 'rgba(255, 255, 255, 0)');
+        shimmerGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.42)');
+        shimmerGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = shimmerGrad;
+        ctx.fillRect(-boxW / 2, -boxH / 2, boxW, boxH);
+        ctx.restore();
+      }
     }
 
     const labelStr = isClues

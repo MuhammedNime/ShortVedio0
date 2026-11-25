@@ -27,11 +27,49 @@ import firebaseConfig from '../../firebase-applet-config.json';
 import {
   BankFolder,
   BankQuestionItem,
+  getModifiedStarterQuestionIds,
+  isBundledStarterQuestionId,
   mergeCloudFoldersIntoVault,
   mergeCloudQuestionsIntoBank,
   normalizeBankQuestionText,
 } from '../storage/questionBankVault';
 import { QUIZ_CATEGORIES, QuizCategory, SlideType } from '../types/quiz';
+
+const CLOUD_SYNC_META_KEY = 'shorts_quiz_cloud_sync_meta_v1';
+
+export interface CloudSyncMeta {
+  lastSyncedAt: number;
+  lastSyncedEmail?: string;
+  lastPulled: number;
+  lastPushed: number;
+}
+
+export function getCloudSyncMeta(): CloudSyncMeta | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CLOUD_SYNC_META_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CloudSyncMeta>;
+    if (typeof parsed.lastSyncedAt !== 'number') return null;
+    return {
+      lastSyncedAt: parsed.lastSyncedAt,
+      lastSyncedEmail: typeof parsed.lastSyncedEmail === 'string' ? parsed.lastSyncedEmail : undefined,
+      lastPulled: Number(parsed.lastPulled) || 0,
+      lastPushed: Number(parsed.lastPushed) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCloudSyncMeta(meta: CloudSyncMeta): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(CLOUD_SYNC_META_KEY, JSON.stringify(meta));
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 export const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const firebaseAuth = getAuth(firebaseApp);
@@ -359,7 +397,10 @@ function sanitizeQuestionDocForFirestore(
   return safeDoc;
 }
 
-export async function pushBankQuestionsToCloud(items: BankQuestionItem[]): Promise<number> {
+export async function pushBankQuestionsToCloud(
+  items: BankQuestionItem[],
+  onProgress?: (written: number, total: number) => void
+): Promise<number> {
   const user = firebaseAuth.currentUser;
   if (!user || items.length === 0) return 0;
 
@@ -379,6 +420,7 @@ export async function pushBankQuestionsToCloud(items: BankQuestionItem[]): Promi
     try {
       await batch.commit();
       written += slice.length;
+      onProgress?.(written, items.length);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, batchPath);
     }
@@ -412,10 +454,22 @@ export async function updateCloudBankQuestion(item: BankQuestionItem): Promise<v
   }
 }
 
+async function getExistingCloudQuestionIdSet(uid: string): Promise<Set<string>> {
+  const path = `users/${uid}/questions`;
+  try {
+    const q = query(collection(firestoreDb, 'users', uid, 'questions'), where('ownerId', '==', uid));
+    const snap = await getDocs(q);
+    return new Set(snap.docs.map((d) => d.id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
 export async function updateCloudBankQuestionsFolder(
   ids: string[],
   folderId: string | undefined,
-  folderPath: string | undefined
+  folderPath: string | undefined,
+  fullItems?: BankQuestionItem[]
 ): Promise<void> {
   const user = firebaseAuth.currentUser;
   if (!user || ids.length === 0) return;
@@ -424,38 +478,130 @@ export async function updateCloudBankQuestionsFolder(
 
   const safeFolderId = folderId ? sanitizeFirestoreId(folderId) : '';
   const safeFolderPath = (folderPath || '').slice(0, 300);
+  const existingCloudIds = await getExistingCloudQuestionIdSet(user.uid);
+  const itemById = new Map((fullItems || []).map((it) => [sanitizeFirestoreId(it.id), it]));
 
-  for (const id of ids) {
-    const safeId = sanitizeFirestoreId(id);
-    const path = `users/${user.uid}/questions/${safeId}`;
-    const ref = doc(firestoreDb, 'users', user.uid, 'questions', safeId);
+  const CHUNK = 350;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const batch = writeBatch(firestoreDb);
+    let ops = 0;
+    for (const rawId of slice) {
+      const safeId = sanitizeFirestoreId(rawId);
+      const ref = doc(firestoreDb, 'users', user.uid, 'questions', safeId);
+      if (existingCloudIds.has(safeId)) {
+        batch.update(ref, {
+          folderId: safeFolderId,
+          folderPath: safeFolderPath,
+          serverUpdatedAt: serverTimestamp(),
+        });
+        ops += 1;
+      } else {
+        const fullItem = itemById.get(safeId);
+        if (fullItem) {
+          batch.set(
+            ref,
+            sanitizeQuestionDocForFirestore(
+              { ...fullItem, folderId: folderId || undefined, folderPath: folderPath || undefined },
+              user.uid
+            )
+          );
+          ops += 1;
+        }
+      }
+    }
+    if (ops === 0) continue;
+    const batchPath = `users/${user.uid}/questions`;
     try {
-      const snap = await getDoc(ref);
-      if (!snap.exists()) continue;
-      await updateDoc(ref, {
-        folderId: safeFolderId,
-        folderPath: safeFolderPath,
-        serverUpdatedAt: serverTimestamp(),
-      });
+      await batch.commit();
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
+      handleFirestoreError(error, OperationType.WRITE, batchPath);
     }
   }
 }
 
-export async function updateCloudBankQuestionUsed(id: string, used: boolean): Promise<void> {
+export async function updateCloudBankQuestionsUsedBatch(
+  ids: string[],
+  used: boolean,
+  fullItems?: BankQuestionItem[]
+): Promise<void> {
+  const user = firebaseAuth.currentUser;
+  if (!user || ids.length === 0) return;
+
+  await ensureFirestoreUserProfile(user);
+
+  const existingCloudIds = await getExistingCloudQuestionIdSet(user.uid);
+  const itemById = new Map((fullItems || []).map((it) => [sanitizeFirestoreId(it.id), it]));
+  const now = Math.floor(Date.now());
+
+  const CHUNK = 350;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const batch = writeBatch(firestoreDb);
+    let ops = 0;
+    for (const rawId of slice) {
+      const safeId = sanitizeFirestoreId(rawId);
+      const ref = doc(firestoreDb, 'users', user.uid, 'questions', safeId);
+      if (existingCloudIds.has(safeId)) {
+        batch.update(ref, {
+          usedInVideo: used,
+          usedAt: used ? now : 0,
+          serverUpdatedAt: serverTimestamp(),
+        });
+        ops += 1;
+      } else if (used) {
+        const fullItem = itemById.get(safeId);
+        if (fullItem) {
+          batch.set(
+            ref,
+            sanitizeQuestionDocForFirestore(
+              { ...fullItem, usedInVideo: true, usedAt: now },
+              user.uid
+            )
+          );
+          ops += 1;
+        }
+      }
+    }
+    if (ops === 0) continue;
+    const batchPath = `users/${user.uid}/questions`;
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, batchPath);
+    }
+  }
+}
+
+export async function updateCloudBankQuestionUsed(
+  id: string,
+  used: boolean,
+  fullItem?: BankQuestionItem
+): Promise<void> {
   const user = firebaseAuth.currentUser;
   if (!user) return;
   const safeId = sanitizeFirestoreId(id);
   const path = `users/${user.uid}/questions/${safeId}`;
   const ref = doc(firestoreDb, 'users', user.uid, 'questions', safeId);
+  const now = Math.floor(Date.now());
   try {
     await ensureFirestoreUserProfile(user);
     const snap = await getDoc(ref);
-    if (!snap.exists()) return;
+    if (!snap.exists()) {
+      if (used && fullItem) {
+        await setDoc(
+          ref,
+          sanitizeQuestionDocForFirestore(
+            { ...fullItem, usedInVideo: true, usedAt: now },
+            user.uid
+          )
+        );
+      }
+      return;
+    }
     await updateDoc(ref, {
       usedInVideo: used,
-      usedAt: used ? Math.floor(Date.now()) : 0,
+      usedAt: used ? now : 0,
       serverUpdatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -475,36 +621,39 @@ export async function deleteCloudBankQuestion(id: string): Promise<void> {
   }
 }
 
-const inFlightBankSyncs = new Map<
-  string,
-  Promise<{
-    pulled: number;
-    pushed: number;
-    foldersPulled: number;
-    foldersPushed: number;
-  }>
->();
-
-export async function syncQuestionBankWithCloud(): Promise<{
+export interface SyncQuestionBankResult {
   pulled: number;
   pushed: number;
   foldersPulled: number;
   foldersPushed: number;
-}> {
+  skippedStarterCount: number;
+}
+
+const inFlightBankSyncs = new Map<string, Promise<SyncQuestionBankResult>>();
+
+export async function syncQuestionBankWithCloud(options?: {
+  includeStarterBank?: boolean;
+  onProgress?: (label: string) => void;
+}): Promise<SyncQuestionBankResult> {
   const user = firebaseAuth.currentUser;
   if (!user) {
     throw new Error('يرجى تسجيل الدخول بحساب Google أولاً لمزامنة الذاكرة مع السحابة.');
   }
 
-  const existingSync = inFlightBankSyncs.get(user.uid);
+  const syncKey = `${user.uid}:${options?.includeStarterBank ? 'full' : 'smart'}`;
+  const existingSync = inFlightBankSyncs.get(syncKey);
   if (existingSync) {
     return existingSync;
   }
 
-  const runSync = (async () => {
+  const includeStarterBank = Boolean(options?.includeStarterBank);
+
+  const runSync = (async (): Promise<SyncQuestionBankResult> => {
+    options?.onProgress?.('جارٍ التحقق من ملف الحساب السحابي...');
     await ensureFirestoreUserProfile(user);
 
     // 1. Sync Hierarchical Folders
+    options?.onProgress?.('جارٍ مزامنة شجرة المجلدات...');
     const foldersPath = `users/${user.uid}/folders`;
     let cloudFolders: BankFolder[] = [];
     try {
@@ -536,6 +685,7 @@ export async function syncQuestionBankWithCloud(): Promise<{
     const foldersPushed = await pushBankFoldersToCloud(localOnlyFolders);
 
     // 2. Sync Questions
+    options?.onProgress?.('جارٍ استرجاع الأسئلة المحفوظة من السحابة...');
     const listPath = `users/${user.uid}/questions`;
     let cloudItems: BankQuestionItem[] = [];
     try {
@@ -578,20 +728,45 @@ export async function syncQuestionBankWithCloud(): Promise<{
     }
 
     const { insertedFromCloud, localOnlyItems } = await mergeCloudQuestionsIntoBank(cloudItems);
-    const pushed = await pushBankQuestionsToCloud(localOnlyItems);
+
+    const modifiedStarterIds = getModifiedStarterQuestionIds();
+    const itemsToPush = includeStarterBank
+      ? localOnlyItems
+      : localOnlyItems.filter(
+          (item) =>
+            !isBundledStarterQuestionId(item.id) ||
+            item.usedInVideo ||
+            modifiedStarterIds.has(item.id)
+        );
+    const skippedStarterCount = localOnlyItems.length - itemsToPush.length;
+
+    let pushed = 0;
+    if (itemsToPush.length > 0) {
+      pushed = await pushBankQuestionsToCloud(itemsToPush, (written, total) => {
+        options?.onProgress?.(`جارٍ رفع الأسئلة للسحابة (${written} / ${total})...`);
+      });
+    }
+
+    saveCloudSyncMeta({
+      lastSyncedAt: Date.now(),
+      lastSyncedEmail: user.email || undefined,
+      lastPulled: insertedFromCloud,
+      lastPushed: pushed,
+    });
 
     return {
       pulled: insertedFromCloud,
       pushed,
       foldersPulled,
       foldersPushed,
+      skippedStarterCount,
     };
   })();
 
-  inFlightBankSyncs.set(user.uid, runSync);
+  inFlightBankSyncs.set(syncKey, runSync);
   try {
     return await runSync;
   } finally {
-    inFlightBankSyncs.delete(user.uid);
+    inFlightBankSyncs.delete(syncKey);
   }
 }

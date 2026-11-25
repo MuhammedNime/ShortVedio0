@@ -549,10 +549,40 @@ export async function saveProjectToStore(project: QuizProject): Promise<void> {
     const nextIndex = [
       summary,
       ...existing.filter((item) => item.id !== stamped.id),
-    ].slice(0, 30);
+    ].slice(0, 50);
     await idbSet(LIBRARY_INDEX_KEY, nextIndex);
   } catch {
     // Ignore storage quota or private browsing errors gracefully
+  }
+}
+
+export async function saveProjectsToLibraryBatch(projects: QuizProject[]): Promise<void> {
+  if (!Array.isArray(projects) || projects.length === 0) return;
+  try {
+    const existing = (await idbGet<ProjectSummary[]>(LIBRARY_INDEX_KEY)) ?? [];
+    const batchSummaries: ProjectSummary[] = [];
+    const batchIds = new Set<string>();
+    const now = Date.now();
+
+    for (let i = 0; i < projects.length; i++) {
+      const p = projects[i];
+      const stamped: QuizProject = {
+        ...p,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        updatedAt: now + (projects.length - i),
+      };
+      await idbSet(`${PROJECT_ITEM_PREFIX}${stamped.id}`, stamped);
+      batchSummaries.push(toSummary(stamped));
+      batchIds.add(stamped.id);
+    }
+
+    const nextIndex = [
+      ...batchSummaries,
+      ...existing.filter((item) => !batchIds.has(item.id)),
+    ].slice(0, 50);
+    await idbSet(LIBRARY_INDEX_KEY, nextIndex);
+  } catch {
+    // Ignore storage errors gracefully
   }
 }
 

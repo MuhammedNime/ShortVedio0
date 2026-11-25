@@ -3,15 +3,14 @@ import {
   Brain,
   Film,
   FolderOpen,
+  Image as ImageIcon,
   Layers,
   Lock,
-  Moon,
   Music,
   Palette,
   Redo2,
   SlidersHorizontal,
   Sparkles,
-  Sun,
   Undo2,
   Youtube,
 } from 'lucide-react';
@@ -28,6 +27,7 @@ import { QuestionBankVaultModal } from './components/QuestionBankVaultModal';
 import { ShortsPreviewStage } from './components/ShortsPreviewStage';
 import { SlidesEditorPanel } from './components/SlidesEditorPanel';
 import { TemplateDesignPanel } from './components/TemplateDesignPanel';
+import { ThumbnailStudioModal } from './components/ThumbnailStudioModal';
 import { GoogleSignInButton, YouTubePublishPanel } from './components/YouTubePublishPanel';
 import { YoutubePublishKit } from './services/aiClient';
 import {
@@ -46,6 +46,10 @@ import {
   saveProjectToStore,
 } from './storage/projectStore';
 import {
+  getBankStats,
+  seedAllStarterBanksIfNeeded,
+} from './storage/questionBankVault';
+import {
   QuestionSlide,
   QuizProject,
   STUDIO_THEME_ORDER,
@@ -62,6 +66,16 @@ import { isAndroidNativeApp } from './utils/nativeDownload';
 
 type StudioTab = 'slides' | 'ai' | 'template' | 'audio' | 'import' | 'youtube';
 type MobileStageMode = 'compact' | 'expanded' | 'collapsed';
+type StudioUiTheme = 'darkGold' | 'midnightPro' | 'emeraldStudio' | 'lightSand';
+
+const STUDIO_UI_THEMES: { id: StudioUiTheme; label: string; dot: string }[] = [
+  { id: 'darkGold', label: 'داكن ذهبي', dot: '#d4a73a' },
+  { id: 'midnightPro', label: 'نيلي احترافي', dot: '#38bdf8' },
+  { id: 'emeraldStudio', label: 'زمردي غامق', dot: '#10b981' },
+  { id: 'lightSand', label: 'رملي فاتح', dot: '#edd6a2' },
+];
+
+const UI_THEME_STORAGE_KEY = 'shorts_studio_ui_theme_v1';
 
 const ApkWebLoginBridge: React.FC<{ onStayInWeb: () => void }> = ({ onStayInWeb }) => {
   const [loading, setLoading] = useState(false);
@@ -169,12 +183,24 @@ export default function App() {
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [aiNotice, setAiNotice] = useState<string | null>(null);
-  const [studioDark, setStudioDark] = useState(true);
+  const [studioUiTheme, setStudioUiTheme] = useState<StudioUiTheme>(() => {
+    try {
+      const saved = localStorage.getItem(UI_THEME_STORAGE_KEY) as StudioUiTheme | null;
+      if (saved && STUDIO_UI_THEMES.some((t) => t.id === saved)) return saved;
+    } catch {
+      // ignore storage errors
+    }
+    return 'darkGold';
+  });
+  const [isThumbStudioOpen, setIsThumbStudioOpen] = useState(false);
+  const [customThumbnailBlob, setCustomThumbnailBlob] = useState<Blob | null>(null);
+  const [customThumbnailPreviewUrl, setCustomThumbnailPreviewUrl] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState(() => isAppLockEnabled());
   const [isLockModalOpen, setIsLockModalOpen] = useState(false);
   const [isProjectsOpen, setIsProjectsOpen] = useState(false);
   const [isVaultOpen, setIsVaultOpen] = useState(false);
   const [vaultRefreshTrigger, setVaultRefreshTrigger] = useState(0);
+  const [vaultTotalCount, setVaultTotalCount] = useState<number>(0);
   const [isToolsMenuOpen, setIsToolsMenuOpen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -212,6 +238,40 @@ export default function App() {
   const lastHistoryPushTimeRef = useRef(0);
 
   useEffect(() => {
+    let active = true;
+    void seedAllStarterBanksIfNeeded(false)
+      .then(() => getBankStats())
+      .then((stats) => {
+        if (!active) return;
+        setVaultTotalCount(stats.total);
+        setVaultRefreshTrigger((n) => n + 1);
+      })
+      .catch(() => {
+        void getBankStats()
+          .then((stats) => {
+            if (active) setVaultTotalCount(stats.total);
+          })
+          .catch(() => {});
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (vaultRefreshTrigger === 0) return;
+    let active = true;
+    void getBankStats()
+      .then((stats) => {
+        if (active) setVaultTotalCount(stats.total);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [vaultRefreshTrigger]);
+
+  useEffect(() => {
     if (!isToolsMenuOpen) return;
     const onPointerDown = (e: PointerEvent) => {
       if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
@@ -233,6 +293,10 @@ export default function App() {
 
   useEffect(() => {
     return setRootBackHandler(() => {
+      if (isThumbStudioOpen) {
+        setIsThumbStudioOpen(false);
+        return true;
+      }
       if (isExportOpen) {
         setIsExportOpen(false);
         return true;
@@ -266,16 +330,24 @@ export default function App() {
       }
       return false;
     });
-  }, [isExportOpen, isVaultOpen, isProjectsOpen, isLockModalOpen, mobileStageMode, tabHistory, activeTab]);
+  }, [isThumbStudioOpen, isExportOpen, isVaultOpen, isProjectsOpen, isLockModalOpen, mobileStageMode, tabHistory, activeTab]);
 
   useEffect(() => {
     const root = document.documentElement;
-    if (studioDark) {
+    root.classList.remove('dark', 'theme-midnight', 'theme-emerald');
+    if (studioUiTheme === 'darkGold') {
       root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
+    } else if (studioUiTheme === 'midnightPro') {
+      root.classList.add('dark', 'theme-midnight');
+    } else if (studioUiTheme === 'emeraldStudio') {
+      root.classList.add('dark', 'theme-emerald');
     }
-  }, [studioDark]);
+    try {
+      localStorage.setItem(UI_THEME_STORAGE_KEY, studioUiTheme);
+    } catch {
+      // ignore
+    }
+  }, [studioUiTheme]);
 
   const updateProject = useCallback(
     (updater: (prev: QuizProject) => QuizProject, immediateHistory = false) => {
@@ -780,18 +852,18 @@ export default function App() {
           } flex-col bg-[var(--panel)] lg:border-l border-t lg:border-t-0 border-[var(--pline)] min-h-0`}
         >
           {/* Unboxed workspace metadata strip + Undo/Redo + Projects + Consolidated Tools Menu */}
-          <div className="flex items-center justify-between gap-2 px-3.5 py-2 lg:px-5 lg:py-2.5 border-b border-[var(--pline)] text-[11px] lg:text-xs text-[var(--pmuted)] shrink-0">
-            <div className="flex items-center gap-1.5 truncate">
-              <span>{project.slides.length} أسئلة</span>
+          <div className="flex items-center justify-between gap-1.5 sm:gap-2 px-2.5 py-1.5 sm:px-3.5 sm:py-2 lg:px-5 lg:py-2.5 border-b border-[var(--pline)] text-[11px] lg:text-xs text-[var(--pmuted)] shrink-0">
+            <div className="flex items-center gap-1 sm:gap-1.5 truncate min-w-0">
+              <span className="truncate">{project.slides.length} أسئلة</span>
               <span aria-hidden="true">·</span>
               <span className="font-mono-nums hidden sm:inline">
                 {canvasDims.width}×{canvasDims.height}
               </span>
               <span aria-hidden="true" className="hidden sm:inline">·</span>
-              <span className="font-mono-nums">{totalDuration.toFixed(1)} ث</span>
+              <span className="font-mono-nums shrink-0">{totalDuration.toFixed(1)} ث</span>
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               <div className="flex items-center border border-[var(--pline)] rounded-lg bg-[var(--surface)] overflow-hidden">
                 <button
                   type="button"
@@ -817,10 +889,15 @@ export default function App() {
                 type="button"
                 onClick={() => setIsVaultOpen(true)}
                 title="مكتبة الذاكرة الكبرى للأسئلة والمجلدات"
-                className="flex items-center gap-1 h-7 px-2 rounded-lg bg-[#00B050]/12 border border-[#00B050]/45 hover:border-[#00B050] text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer whitespace-nowrap"
+                className="flex items-center gap-1 h-7 px-1.5 sm:px-2 rounded-lg bg-[#00B050]/12 border border-[#00B050]/45 hover:border-[#00B050] text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7] cursor-pointer whitespace-nowrap"
               >
-                <Brain className="w-3.5 h-3.5" />
+                <Brain className="w-3.5 h-3.5 shrink-0" />
                 <span>الذاكرة</span>
+                {vaultTotalCount > 0 && (
+                  <span className="px-1 sm:px-1.5 py-0.2 rounded-full bg-[#00B050] text-white text-[10px] font-extrabold leading-tight font-mono-nums">
+                    {vaultTotalCount}
+                  </span>
+                )}
               </button>
 
               <button
@@ -849,7 +926,23 @@ export default function App() {
                 </button>
 
                 {isToolsMenuOpen && (
-                  <div className="absolute left-0 top-9 z-40 w-44 p-1.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)] shadow-xl flex flex-col gap-0.5">
+                  <div className="absolute left-0 top-9 z-40 w-52 p-1.5 rounded-xl bg-[var(--panel)] border border-[var(--pline)] shadow-xl flex flex-col gap-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsToolsMenuOpen(false);
+                        setIsThumbStudioOpen(true);
+                      }}
+                      className="flex items-center justify-between gap-2 w-full px-3 py-2 rounded-lg text-xs font-bold text-[var(--ptxt)] hover:bg-[var(--surface)] transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      <span className="flex items-center gap-2">
+                        <ImageIcon className="w-3.5 h-3.5 text-[var(--gold)] shrink-0" />
+                        <span>استوديو الغلاف (Thumbnail)</span>
+                      </span>
+                      {customThumbnailPreviewUrl && (
+                        <span className="w-2 h-2 rounded-full bg-[#00B050]" />
+                      )}
+                    </button>
                     <PWAInstallButton
                       variant="menuItem"
                       onAction={() => setIsToolsMenuOpen(false)}
@@ -865,21 +958,38 @@ export default function App() {
                       <Lock className="w-3.5 h-3.5 text-[#00B050] shrink-0" />
                       <span>قفل الخصوصية</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStudioDark((d) => !d);
-                        setIsToolsMenuOpen(false);
-                      }}
-                      className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-semibold text-[var(--ptxt)] hover:bg-[var(--surface)] transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      {studioDark ? (
-                        <Sun className="w-3.5 h-3.5 text-[var(--gold)] shrink-0" />
-                      ) : (
-                        <Moon className="w-3.5 h-3.5 text-[var(--gold)] shrink-0" />
-                      )}
-                      <span>{studioDark ? 'المظهر الفاتح' : 'المظهر الداكن'}</span>
-                    </button>
+
+                    <div className="mt-1 pt-1.5 border-t border-[var(--pline)] px-2 pb-1">
+                      <span className="block text-[10px] font-bold text-[var(--pmuted)] mb-1.5">
+                        ثيم واجهة الاستوديو:
+                      </span>
+                      <div className="grid grid-cols-2 gap-1">
+                        {STUDIO_UI_THEMES.map((t) => {
+                          const active = studioUiTheme === t.id;
+                          return (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => {
+                                setStudioUiTheme(t.id);
+                                setIsToolsMenuOpen(false);
+                              }}
+                              className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-[10px] font-bold cursor-pointer transition-colors ${
+                                active
+                                  ? 'bg-[#00B050]/16 border-[#00B050] text-[#00B050] dark:text-[#6ee7b7]'
+                                  : 'bg-[var(--surface)] border-[var(--pline)] text-[var(--ptxt)] hover:border-[var(--gold)]'
+                              }`}
+                            >
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-white/40 shrink-0"
+                                style={{ backgroundColor: t.dot }}
+                              />
+                              <span className="truncate">{t.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -928,17 +1038,21 @@ export default function App() {
                 onVoiceChange={(voice) =>
                   updateProject((prev) => ({ ...prev, preferredAiVoice: voice }), true)
                 }
-                onInsertSlides={(newSlides, mode, enableAutoSync, warningMessage, applyMathTheme) => {
+                onInsertSlides={(newSlides, mode, enableAutoSync, warningMessage, themePreset) => {
                   const targetIdx = mode === 'replace' ? 0 : project.slides.length;
                   updateProject((prev) => {
                     const updatedSlides =
                       mode === 'replace' ? newSlides : [...prev.slides, ...newSlides];
+                    const nextTemplate =
+                      themePreset === true || themePreset === 'math'
+                        ? applyChannelThemePreset(prev.template, 'channelMath')
+                        : themePreset === 'islamic'
+                          ? applyStudioThemePreset(prev.template, 'islamicAndalusian')
+                          : prev.template;
                     return {
                       ...prev,
                       slides: updatedSlides,
-                      template: applyMathTheme
-                        ? applyChannelThemePreset(prev.template, 'channelMath')
-                        : prev.template,
+                      template: nextTemplate,
                       timing: enableAutoSync
                         ? { ...prev.timing, autoSyncWithAudio: true }
                         : prev.timing,
@@ -1039,6 +1153,8 @@ export default function App() {
                   }
                   setIsExportOpen(true);
                 }}
+                customThumbnailPreviewUrl={customThumbnailPreviewUrl}
+                onOpenThumbnailStudio={() => setIsThumbStudioOpen(true)}
               />
             )}
           </div>
@@ -1153,6 +1269,26 @@ export default function App() {
         ytAuthError={ytAuthError}
         onConnectYouTube={handleConnectYouTube}
         onDisconnectYouTube={handleDisconnectYouTube}
+        customThumbnailBlob={customThumbnailBlob}
+        customThumbnailPreviewUrl={customThumbnailPreviewUrl}
+        onOpenThumbnailStudio={() => setIsThumbStudioOpen(true)}
+      />
+
+      {/* YouTube Custom Thumbnail Studio Modal */}
+      <ThumbnailStudioModal
+        isOpen={isThumbStudioOpen}
+        project={project}
+        activeSlideIndex={activeSlideIndex}
+        hasAttachedThumbnail={Boolean(customThumbnailBlob)}
+        onClose={() => setIsThumbStudioOpen(false)}
+        onAttachForYouTube={(blob, previewUrl) => {
+          setCustomThumbnailBlob(blob);
+          setCustomThumbnailPreviewUrl(previewUrl);
+        }}
+        onClearAttachedThumbnail={() => {
+          setCustomThumbnailBlob(null);
+          setCustomThumbnailPreviewUrl(null);
+        }}
       />
 
       {/* Large Collapsible Question Bank & Nested Folders Vault */}
@@ -1166,17 +1302,34 @@ export default function App() {
         onVoiceChange={(voice) =>
           updateProject((prev) => ({ ...prev, preferredAiVoice: voice }), true)
         }
-        onInsertSlides={(newSlides, mode, enableAutoSync, warningMessage, applyMathTheme) => {
+        onInsertSlides={(
+          newSlides,
+          mode,
+          enableAutoSync,
+          warningMessage,
+          themePreset,
+          aspectRatioOverride
+        ) => {
           const targetIdx = mode === 'replace' ? 0 : project.slides.length;
           updateProject((prev) => {
             const updatedSlides =
               mode === 'replace' ? newSlides : [...prev.slides, ...newSlides];
+            let nextTemplate =
+              themePreset === true || themePreset === 'math'
+                ? applyChannelThemePreset(prev.template, 'channelMath')
+                : themePreset === 'islamic'
+                  ? applyStudioThemePreset(prev.template, 'islamicAndalusian')
+                  : prev.template;
+            if (aspectRatioOverride && nextTemplate.aspectRatio !== aspectRatioOverride) {
+              nextTemplate = {
+                ...nextTemplate,
+                aspectRatio: aspectRatioOverride,
+              };
+            }
             return {
               ...prev,
               slides: updatedSlides,
-              template: applyMathTheme
-                ? applyChannelThemePreset(prev.template, 'channelMath')
-                : prev.template,
+              template: nextTemplate,
               timing: enableAutoSync
                 ? { ...prev.timing, autoSyncWithAudio: true }
                 : prev.timing,

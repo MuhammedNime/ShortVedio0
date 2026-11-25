@@ -27,6 +27,30 @@
     --ok: #00b050;
   }
 
+  .dark.theme-midnight {
+    --page: #070b14;
+    --panel: #111827;
+    --surface: #0b1120;
+    --ptxt: #f1f5f9;
+    --pmuted: #94a3b8;
+    --pline: #1e293b;
+    --sand: #dbeafe;
+    --gold: #38bdf8;
+    --ok: #00b050;
+  }
+
+  .dark.theme-emerald {
+    --page: #04120d;
+    --panel: #0b241c;
+    --surface: #071b14;
+    --ptxt: #ecfdf5;
+    --pmuted: #86b3a1;
+    --pline: #174636;
+    --sand: #d1fae5;
+    --gold: #f59e0b;
+    --ok: #10b981;
+  }
+
   body {
     background-color: var(--page);
     color: var(--ptxt);

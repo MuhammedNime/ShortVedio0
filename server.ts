@@ -1599,6 +1599,104 @@ ${summaryLines}
     }
   });
 
+  const sanitizeSvgPayload = (rawSvg: string): string => {
+    const cleaned = String(rawSvg || '')
+      .replace(/<\?xml[\s\S]*?\?>/gi, '')
+      .replace(/<!DOCTYPE[\s\S]*?>/gi, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
+      .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/(?:xlink:)?href\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '')
+      .trim();
+    const match = cleaned.match(/<svg[\s\S]*<\/svg>/i);
+    return match ? match[0] : '';
+  };
+
+  app.post('/api/ai/generate-puzzle-svg', async (req, res) => {
+    try {
+      const { question, categoryLabel, hint } = req.body as {
+        question?: string;
+        categoryLabel?: string;
+        hint?: string;
+      };
+      const cleanQuestion = String(question || '').trim();
+      if (!cleanQuestion) {
+        res.status(400).json({ error: 'يرجى كتابة نص السؤال أولاً لتوليد رسم اللغز.' });
+        return;
+      }
+
+      const svgSystemInstruction =
+        'You are an expert flat-vector geometric illustrator. Output valid JSON with a clean, colorful, recognizable <svg viewBox="0 0 600 450" xmlns="http://www.w3.org/2000/svg"> illustration representing the quiz subject without revealing the answer as written text.';
+
+      const svgUserPrompt = `Quiz Question (Arabic): ${cleanQuestion}
+${categoryLabel ? `Category: ${String(categoryLabel).trim()}\n` : ''}${hint ? `Visual clue hint: ${String(hint).trim()}\n` : ''}
+Create a vivid, high-contrast vector illustration SVG (viewBox="0 0 600 450") for a blurred-image mystery quiz card:
+- Start with a rich multi-stop <defs><linearGradient> background covering the 600x450 canvas.
+- Draw 6 to 15 clean geometric shapes (<circle>, <rect>, <path>, <polygon>, <ellipse>) with strong distinct colors, shadows, or metallic highlights depicting the main subject of the question cleanly.
+- STRICT RULE: NEVER include any <text> or <tspan> or written words/letters/numbers inside the SVG so the viewer isn't spoiled.
+- NEVER include <script>, event attributes, or external URLs.
+Return JSON object with fields:
+- svg: the complete <svg viewBox="0 0 600 450" xmlns="http://www.w3.org/2000/svg">...</svg> string
+- title: brief 2-4 word Arabic description of the artwork`;
+
+      const { data: svgResult, provider: usedProvider } = await runTextJsonAcrossProviders({
+        geminiTask: async (ai, model) => {
+          const response = await ai.models.generateContent({
+            model,
+            contents: svgUserPrompt,
+            config: {
+              thinkingConfig: {
+                thinkingLevel:
+                  model === 'gemini-3.1-flash-lite'
+                    ? ThinkingLevel.MINIMAL
+                    : ThinkingLevel.LOW,
+              },
+              systemInstruction: svgSystemInstruction,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  svg: { type: Type.STRING },
+                  title: { type: Type.STRING },
+                },
+                required: ['svg', 'title'],
+              },
+            },
+          });
+          return response.text ?? '{}';
+        },
+        externalSystemInstruction: svgSystemInstruction,
+        externalUserPrompt: `${svgUserPrompt}\n\nReturn ONLY valid JSON: {"svg": "<svg ...>...</svg>", "title": "..."}`,
+        parseAndValidate: (payload) => {
+          const parsed = (payload && typeof payload === 'object' ? payload : {}) as {
+            svg?: string;
+            title?: string;
+          };
+          const safeSvg = sanitizeSvgPayload(parsed.svg || '');
+          if (!safeSvg) {
+            throw new Error('لم يكتمل رسم الشكل التوضيحي.');
+          }
+          return {
+            svg: safeSvg,
+            title: String(parsed.title || 'صورة لغز بالذكاء').trim().slice(0, 60),
+          };
+        },
+      });
+
+      res.json({
+        svg: svgResult.svg,
+        title: svgResult.title,
+        provider: usedProvider,
+      });
+    } catch (err) {
+      const formatted = formatGeminiError(err, 'text');
+      res.status(formatted.status).json({
+        error: formatted.message,
+        quotaExhausted: formatted.quotaExhausted,
+      });
+    }
+  });
+
   // YouTube OAuth helpers (Popup Flow -> postMessage)
   const getYouTubeOAuthCredentials = () => {
     const clientId = (

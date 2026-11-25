@@ -45,29 +45,69 @@ const DB_VERSION = 2;
 const STORE_NAME = 'bank_questions';
 const FOLDERS_STORE_NAME = 'bank_folders';
 const FOLDERS_SEEDED_KEY = 'shorts_quiz_bank_folders_seeded_v1';
+const ISLAMIC_1000_SEEDED_KEY = 'shorts_quiz_islamic_1000_seeded_v1';
+const ISLAMIC_USER_CLEARED_KEY = 'shorts_quiz_islamic_user_cleared_v1';
+const EXTRA_STARTER_SEEDED_KEY = 'shorts_quiz_extra_starter_v1';
+const MODIFIED_STARTER_IDS_KEY = 'shorts_quiz_modified_starter_ids_v1';
 
-const STARTER_FOLDERS: BankFolder[] = [
+export function isBundledStarterQuestionId(id: string): boolean {
+  return /^(islamic_1000_|starter_)/.test(id || '');
+}
+
+export function getModifiedStarterQuestionIds(): Set<string> {
+  if (typeof localStorage === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem(MODIFIED_STARTER_IDS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr.filter((v): v is string => typeof v === 'string')) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function recordModifiedStarterIds(ids: string[]): void {
+  const starterIds = ids.filter((id) => isBundledStarterQuestionId(id));
+  if (starterIds.length === 0 || typeof localStorage === 'undefined') return;
+  try {
+    const current = getModifiedStarterQuestionIds();
+    for (const id of starterIds) current.add(id);
+    localStorage.setItem(MODIFIED_STARTER_IDS_KEY, JSON.stringify(Array.from(current)));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+const ISLAMIC_STARTER_FOLDERS: BankFolder[] = [
   { id: 'folder_islamic', name: 'ديني وإسلاميات', parentId: null, category: 'islamic', emoji: '🕌', createdAt: 1001 },
   { id: 'folder_islamic_quran', name: 'القرآن الكريم', parentId: 'folder_islamic', category: 'islamic', emoji: '📖', createdAt: 1002 },
   { id: 'folder_islamic_seerah', name: 'السيرة النبوية', parentId: 'folder_islamic', category: 'islamic', emoji: '🌙', createdAt: 1003 },
   { id: 'folder_islamic_sahaba', name: 'الصحابة والتابعون', parentId: 'folder_islamic', category: 'islamic', emoji: '⭐', createdAt: 1004 },
+  { id: 'folder_islamic_prophets', name: 'الأنبياء والرسل', parentId: 'folder_islamic', category: 'islamic', emoji: '🕊️', createdAt: 1005 },
+  { id: 'folder_islamic_fiqh', name: 'الفقه والعبادات', parentId: 'folder_islamic', category: 'islamic', emoji: '⚖️', createdAt: 1006 },
+  { id: 'folder_islamic_history', name: 'الغزوات والتاريخ الإسلامي', parentId: 'folder_islamic', category: 'islamic', emoji: '🛡️', createdAt: 1007 },
+  { id: 'folder_islamic_akhlaq', name: 'الأحاديث والأذكار والأخلاق', parentId: 'folder_islamic', category: 'islamic', emoji: '📿', createdAt: 1008 },
+];
 
-  { id: 'folder_math', name: 'رياضيات', parentId: null, category: 'math', emoji: '🧮', createdAt: 1005 },
-  { id: 'folder_math_algebra', name: 'جبر ومعادلات', parentId: 'folder_math', category: 'math', emoji: '✖️', createdAt: 1006 },
-  { id: 'folder_math_geometry', name: 'هندسة ومساحات', parentId: 'folder_math', category: 'math', emoji: '📐', createdAt: 1007 },
-  { id: 'folder_math_fractions', name: 'كسور وجذور', parentId: 'folder_math', category: 'math', emoji: '➗', createdAt: 1008 },
+const STARTER_FOLDERS: BankFolder[] = [
+  ...ISLAMIC_STARTER_FOLDERS,
 
-  { id: 'folder_science', name: 'علوم وفضاء', parentId: null, category: 'science', emoji: '🔬', createdAt: 1009 },
-  { id: 'folder_science_space', name: 'الفضاء والكواكب', parentId: 'folder_science', category: 'science', emoji: '🪐', createdAt: 1010 },
-  { id: 'folder_science_human', name: 'جسم الإنسان', parentId: 'folder_science', category: 'science', emoji: '🧬', createdAt: 1011 },
+  { id: 'folder_math', name: 'رياضيات', parentId: null, category: 'math', emoji: '🧮', createdAt: 1009 },
+  { id: 'folder_math_algebra', name: 'جبر ومعادلات', parentId: 'folder_math', category: 'math', emoji: '✖️', createdAt: 1010 },
+  { id: 'folder_math_geometry', name: 'هندسة ومساحات', parentId: 'folder_math', category: 'math', emoji: '📐', createdAt: 1011 },
+  { id: 'folder_math_fractions', name: 'كسور وجذور', parentId: 'folder_math', category: 'math', emoji: '➗', createdAt: 1012 },
 
-  { id: 'folder_geography', name: 'جغرافيا', parentId: null, category: 'geography', emoji: '🌍', createdAt: 1012 },
-  { id: 'folder_geography_capitals', name: 'دول وعواصم', parentId: 'folder_geography', category: 'geography', emoji: '🗺️', createdAt: 1013 },
+  { id: 'folder_science', name: 'علوم وفضاء', parentId: null, category: 'science', emoji: '🔬', createdAt: 1013 },
+  { id: 'folder_science_space', name: 'الفضاء والكواكب', parentId: 'folder_science', category: 'science', emoji: '🪐', createdAt: 1014 },
+  { id: 'folder_science_human', name: 'جسم الإنسان', parentId: 'folder_science', category: 'science', emoji: '🧬', createdAt: 1015 },
 
-  { id: 'folder_sports', name: 'رياضة', parentId: null, category: 'sports', emoji: '⚽', createdAt: 1014 },
-  { id: 'folder_history', name: 'تاريخ وحضارات', parentId: null, category: 'history', emoji: '🏛️', createdAt: 1015 },
-  { id: 'folder_discussion', name: 'نقاش وتفاعل', parentId: null, category: 'discussion', emoji: '💬', createdAt: 1016 },
-  { id: 'folder_general', name: 'ثقافة عامة', parentId: null, category: 'general', emoji: '💡', createdAt: 1017 },
+  { id: 'folder_geography', name: 'جغرافيا', parentId: null, category: 'geography', emoji: '🌍', createdAt: 1016 },
+  { id: 'folder_geography_capitals', name: 'دول وعواصم', parentId: 'folder_geography', category: 'geography', emoji: '🗺️', createdAt: 1017 },
+
+  { id: 'folder_sports', name: 'رياضة', parentId: null, category: 'sports', emoji: '⚽', createdAt: 1018 },
+  { id: 'folder_history', name: 'تاريخ وحضارات', parentId: null, category: 'history', emoji: '🏛️', createdAt: 1019 },
+  { id: 'folder_discussion', name: 'نقاش وتفاعل', parentId: null, category: 'discussion', emoji: '💬', createdAt: 1020 },
+  { id: 'folder_general', name: 'ثقافة عامة', parentId: null, category: 'general', emoji: '💡', createdAt: 1021 },
 ];
 
 export function normalizeBankQuestionText(text: string): string {
@@ -657,6 +697,9 @@ export async function updateBankQuestionItem(
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error ?? new Error('Failed to update bank question'));
   });
+  if (updated) {
+    recordModifiedStarterIds([id]);
+  }
   return updated;
 }
 
@@ -689,6 +732,7 @@ export async function moveBankQuestionsToFolder(
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error ?? new Error('Failed to move bank questions'));
   });
+  recordModifiedStarterIds(ids);
 }
 
 export async function markBankQuestionsUsed(
@@ -718,6 +762,7 @@ export async function markBankQuestionsUsed(
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error ?? new Error('Failed to update bank items'));
   });
+  recordModifiedStarterIds(ids);
 }
 
 export async function deleteBankQuestion(id: string): Promise<void> {
@@ -748,6 +793,14 @@ export async function clearBankQuestions(category?: QuizCategory | 'all'): Promi
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error ?? new Error('Failed to clear bank'));
   });
+
+  if (typeof localStorage !== 'undefined' && (!category || category === 'all' || category === 'islamic')) {
+    try {
+      localStorage.setItem(ISLAMIC_USER_CLEARED_KEY, '1');
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export function bankItemToQuestionSlide(item: BankQuestionItem): QuestionSlide {
@@ -779,6 +832,8 @@ export async function mergeCloudQuestionsIntoBank(
   const toPutLocally: BankQuestionItem[] = [];
   let insertedFromCloud = 0;
 
+  const modifiedStarterIds = getModifiedStarterQuestionIds();
+
   for (const cItem of cloudItems) {
     const norm = cItem.normalizedKey || normalizeBankQuestionText(cItem.question);
     const existing = localById.get(cItem.id) ?? localNormKeys.get(norm);
@@ -786,13 +841,19 @@ export async function mergeCloudQuestionsIntoBank(
       toPutLocally.push({ ...cItem, normalizedKey: norm });
       insertedFromCloud += 1;
     } else {
-      const needUsedUpdate = cItem.usedInVideo && !existing.usedInVideo;
+      const isLocallyModified = modifiedStarterIds.has(existing.id);
+      const cloudUsedTs = cItem.usedAt ?? 0;
+      const localUsedTs = existing.usedAt ?? 0;
+      const needUsedUpdate =
+        cItem.usedInVideo &&
+        !existing.usedInVideo &&
+        (!isLocallyModified || cloudUsedTs > localUsedTs);
       const needFolderUpdate = Boolean(cItem.folderId && !existing.folderId);
       if (needUsedUpdate || needFolderUpdate) {
         toPutLocally.push({
           ...existing,
-          usedInVideo: existing.usedInVideo || cItem.usedInVideo,
-          usedAt: existing.usedAt ?? cItem.usedAt,
+          usedInVideo: needUsedUpdate ? true : existing.usedInVideo,
+          usedAt: needUsedUpdate ? cItem.usedAt ?? Date.now() : existing.usedAt,
           folderId: existing.folderId ?? cItem.folderId,
           folderPath: existing.folderPath ?? cItem.folderPath,
         });
@@ -952,3 +1013,318 @@ export function parseManualBulkQuestionsText(
 
   return out;
 }
+
+let islamicSeedInFlight: Promise<{ seeded: boolean; addedCount: number; folderCount: number }> | null =
+  null;
+
+async function fetchIslamicStarterBankItems(): Promise<BankQuestionItem[]> {
+  try {
+    const mod = await import('../data/islamic-bank-1000.json');
+    const bundled = (mod.default ?? mod) as unknown;
+    if (Array.isArray(bundled) && bundled.length > 0) {
+      return bundled as BankQuestionItem[];
+    }
+  } catch {
+    // fallback to fetch below
+  }
+
+  const baseUrl =
+    typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL
+      ? import.meta.env.BASE_URL
+      : '/';
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const candidateUrls = [
+    `${normalizedBase}data/islamic-bank-1000.json`,
+    '/data/islamic-bank-1000.json',
+    './data/islamic-bank-1000.json',
+  ];
+
+  for (const url of candidateUrls) {
+    try {
+      const res = await fetch(url, { cache: 'no-cache' });
+      if (!res.ok) continue;
+      const parsed = (await res.json()) as unknown;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as BankQuestionItem[];
+      }
+    } catch {
+      // try next URL
+    }
+  }
+  throw new Error('تعذر العثور على ملف الأسئلة الدينية المدمج.');
+}
+
+export async function seedIslamicStarterBankIfNeeded(
+  force = false
+): Promise<{ seeded: boolean; addedCount: number; folderCount: number }> {
+  if (islamicSeedInFlight) {
+    return islamicSeedInFlight;
+  }
+
+  const run = async (): Promise<{ seeded: boolean; addedCount: number; folderCount: number }> => {
+    if (force && typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(ISLAMIC_USER_CLEARED_KEY);
+      } catch {
+        // ignore
+      }
+    }
+
+    const alreadySeeded =
+      typeof localStorage !== 'undefined' && localStorage.getItem(ISLAMIC_1000_SEEDED_KEY) === '1';
+    const userCleared =
+      typeof localStorage !== 'undefined' && localStorage.getItem(ISLAMIC_USER_CLEARED_KEY) === '1';
+
+    if (!force && alreadySeeded) {
+      if (userCleared) {
+        return { seeded: false, addedCount: 0, folderCount: 0 };
+      }
+      const existingCheck = await getAllBankQuestions();
+      const hasAnyIslamic = existingCheck.some((q) => q.category === 'islamic');
+      if (hasAnyIslamic) {
+        return { seeded: false, addedCount: 0, folderCount: 0 };
+      }
+    }
+
+    const db = await openBankDb();
+
+    // Ensure all starter Islamic parent + 7 child folders exist (do not overwrite existing user edits)
+    const existingFolders = await new Promise<BankFolder[]>((resolve, reject) => {
+      const tx = db.transaction(FOLDERS_STORE_NAME, 'readonly');
+      const req = tx.objectStore(FOLDERS_STORE_NAME).getAll();
+      req.onsuccess = () => resolve((req.result as BankFolder[]) || []);
+      req.onerror = () => reject(req.error ?? new Error('Failed to read folders'));
+    });
+
+    const existingFolderIds = new Set(existingFolders.map((f) => f.id));
+    const foldersToInsert = (
+      existingFolders.length === 0 ? STARTER_FOLDERS : ISLAMIC_STARTER_FOLDERS
+    ).filter((f) => !existingFolderIds.has(f.id));
+
+    if (foldersToInsert.length > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(FOLDERS_STORE_NAME, 'readwrite');
+        const fStore = tx.objectStore(FOLDERS_STORE_NAME);
+        for (const folder of foldersToInsert) {
+          fStore.put(folder);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error('Failed to upsert Islamic starter folders'));
+      });
+    }
+
+    // Load bundled 1,000 Islamic questions and insert any not already present locally
+    const starterItems = await fetchIslamicStarterBankItems();
+    const existingQuestions = await getAllBankQuestions();
+    const existingIds = new Set(existingQuestions.map((q) => q.id));
+    const existingNormKeys = new Set(
+      existingQuestions.map((q) => q.normalizedKey || normalizeBankQuestionText(q.question))
+    );
+
+    const itemsToInsert: BankQuestionItem[] = [];
+    for (const raw of starterItems) {
+      if (!raw || typeof raw.question !== 'string' || !raw.question.trim()) continue;
+      const norm = raw.normalizedKey || normalizeBankQuestionText(raw.question);
+      if (existingIds.has(raw.id) || existingNormKeys.has(norm)) continue;
+      existingIds.add(raw.id);
+      existingNormKeys.add(norm);
+      itemsToInsert.push({
+        ...raw,
+        category: 'islamic',
+        normalizedKey: norm,
+        usedInVideo: Boolean(raw.usedInVideo),
+        createdAt: Number(raw.createdAt) || Date.now(),
+      });
+    }
+
+    if (itemsToInsert.length > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        for (const item of itemsToInsert) {
+          store.put(item);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error('Failed to insert Islamic starter bank'));
+      });
+    }
+
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(FOLDERS_SEEDED_KEY, '1');
+        localStorage.setItem(ISLAMIC_1000_SEEDED_KEY, '1');
+      } catch {
+        // ignore
+      }
+    }
+
+    return {
+      seeded: true,
+      addedCount: itemsToInsert.length,
+      folderCount: foldersToInsert.length,
+    };
+  };
+
+  islamicSeedInFlight = run().finally(() => {
+    islamicSeedInFlight = null;
+  });
+
+  return islamicSeedInFlight;
+}
+
+let extraSeedInFlight: Promise<{ seeded: boolean; addedCount: number; folderCount: number }> | null =
+  null;
+
+async function fetchExtraStarterBankItems(): Promise<BankQuestionItem[]> {
+  try {
+    const mod = await import('../data/extra-banks.json');
+    const bundled = (mod.default ?? mod) as unknown;
+    if (Array.isArray(bundled) && bundled.length > 0) {
+      return bundled as BankQuestionItem[];
+    }
+  } catch {
+    // fallback to fetch below
+  }
+
+  const baseUrl =
+    typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL
+      ? import.meta.env.BASE_URL
+      : '/';
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const candidateUrls = [
+    `${normalizedBase}data/extra-banks.json`,
+    '/data/extra-banks.json',
+    './data/extra-banks.json',
+  ];
+
+  for (const url of candidateUrls) {
+    try {
+      const res = await fetch(url, { cache: 'no-cache' });
+      if (!res.ok) continue;
+      const parsed = (await res.json()) as unknown;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as BankQuestionItem[];
+      }
+    } catch {
+      // try next URL
+    }
+  }
+  return [];
+}
+
+export async function seedExtraStarterBanksIfNeeded(
+  force = false
+): Promise<{ seeded: boolean; addedCount: number; folderCount: number }> {
+  if (extraSeedInFlight) {
+    return extraSeedInFlight;
+  }
+
+  const run = async (): Promise<{ seeded: boolean; addedCount: number; folderCount: number }> => {
+    const alreadySeeded =
+      typeof localStorage !== 'undefined' && localStorage.getItem(EXTRA_STARTER_SEEDED_KEY) === '1';
+
+    if (!force && alreadySeeded) {
+      const existingCheck = await getAllBankQuestions();
+      const hasAnyExtra = existingCheck.some((q) => q.id.startsWith('starter_'));
+      if (hasAnyExtra) {
+        return { seeded: false, addedCount: 0, folderCount: 0 };
+      }
+    }
+
+    const db = await openBankDb();
+    const existingFolders = await new Promise<BankFolder[]>((resolve, reject) => {
+      const tx = db.transaction(FOLDERS_STORE_NAME, 'readonly');
+      const req = tx.objectStore(FOLDERS_STORE_NAME).getAll();
+      req.onsuccess = () => resolve((req.result as BankFolder[]) || []);
+      req.onerror = () => reject(req.error ?? new Error('Failed to read folders'));
+    });
+
+    const existingFolderIds = new Set(existingFolders.map((f) => f.id));
+    const foldersToInsert = STARTER_FOLDERS.filter((f) => !existingFolderIds.has(f.id));
+    if (foldersToInsert.length > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(FOLDERS_STORE_NAME, 'readwrite');
+        const fStore = tx.objectStore(FOLDERS_STORE_NAME);
+        for (const folder of foldersToInsert) {
+          fStore.put(folder);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error('Failed to upsert starter folders'));
+      });
+    }
+
+    const starterItems = await fetchExtraStarterBankItems();
+    if (starterItems.length === 0) {
+      return { seeded: false, addedCount: 0, folderCount: foldersToInsert.length };
+    }
+
+    const existingQuestions = await getAllBankQuestions();
+    const existingIds = new Set(existingQuestions.map((q) => q.id));
+    const existingNormKeys = new Set(
+      existingQuestions.map((q) => q.normalizedKey || normalizeBankQuestionText(q.question))
+    );
+
+    const itemsToInsert: BankQuestionItem[] = [];
+    for (const raw of starterItems) {
+      if (!raw || typeof raw.question !== 'string' || !raw.question.trim()) continue;
+      const norm = raw.normalizedKey || normalizeBankQuestionText(raw.question);
+      if (existingIds.has(raw.id) || existingNormKeys.has(norm)) continue;
+      existingIds.add(raw.id);
+      existingNormKeys.add(norm);
+      itemsToInsert.push({
+        ...raw,
+        normalizedKey: norm,
+        usedInVideo: Boolean(raw.usedInVideo),
+        createdAt: Number(raw.createdAt) || Date.now(),
+      });
+    }
+
+    if (itemsToInsert.length > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        for (const item of itemsToInsert) {
+          store.put(item);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error('Failed to insert extra starter bank'));
+      });
+    }
+
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(FOLDERS_SEEDED_KEY, '1');
+        localStorage.setItem(EXTRA_STARTER_SEEDED_KEY, '1');
+      } catch {
+        // ignore
+      }
+    }
+
+    return {
+      seeded: true,
+      addedCount: itemsToInsert.length,
+      folderCount: foldersToInsert.length,
+    };
+  };
+
+  extraSeedInFlight = run().finally(() => {
+    extraSeedInFlight = null;
+  });
+
+  return extraSeedInFlight;
+}
+
+export async function seedAllStarterBanksIfNeeded(
+  force = false
+): Promise<{ seeded: boolean; addedCount: number; folderCount: number }> {
+  const [islamicRes, extraRes] = await Promise.all([
+    seedIslamicStarterBankIfNeeded(force),
+    seedExtraStarterBanksIfNeeded(force),
+  ]);
+  return {
+    seeded: islamicRes.seeded || extraRes.seeded,
+    addedCount: islamicRes.addedCount + extraRes.addedCount,
+    folderCount: islamicRes.folderCount + extraRes.folderCount,
+  };
+}
+

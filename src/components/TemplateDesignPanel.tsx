@@ -44,6 +44,14 @@ import {
   setDefaultCustomStyleId,
   updateCustomPresetAsync,
 } from '../storage/customPresets';
+import {
+  ChannelBrandKit,
+  applyBrandKitToTemplate,
+  deleteBrandKitAsync,
+  loadBrandKits,
+  loadBrandKitsAsync,
+  saveBrandKitAsync,
+} from '../storage/brandKits';
 import { readFileAsDataUrl } from '../storage/projectStore';
 import { saveOrDownloadBlob } from '../utils/nativeDownload';
 import {
@@ -101,11 +109,22 @@ const ANIM_OPTIONS: { id: AnimationStyle; label: string }[] = [
 
 const ONE_CLICK_STYLES: { id: PresetId; label: string; emoji: string; accent: string }[] = [
   { id: 'channelSand', label: 'أسلوب القناة', emoji: '📺', accent: '#EDD6A2' },
+  { id: 'islamicAndalusian', label: 'أندلسي فاخر', emoji: '🕌', accent: '#eab308' },
+  { id: 'cosmicSpace', label: 'مجرة الفضاء', emoji: '🌌', accent: '#38bdf8' },
+  { id: 'stadiumArena', label: 'ملعب الأبطال', emoji: '⚽', accent: '#22c55e' },
+  { id: 'ancientHistory', label: 'كنوز التاريخ', emoji: '🏺', accent: '#c9a24a' },
   { id: 'millionaire', label: 'المليونير', emoji: '💎', accent: '#1a3b8e' },
   { id: 'neonCyber', label: 'النيون', emoji: '⚡', accent: '#22d3ee' },
-  { id: 'parchmentGold', label: 'المخطوطة', emoji: '📜', accent: '#e8d4a2' },
   { id: 'tvShowGold', label: 'البث الذهبي', emoji: '🏆', accent: '#facc15' },
   { id: 'crimsonArena', label: 'حلبة التحدي', emoji: '🔥', accent: '#f43f5e' },
+];
+
+const VIRAL_HOOK_PRESETS = [
+  '90% يخطئون في السؤال الأخير! 🤯',
+  'اختبر ثقافتك الإسلامية في 30 ثانية 🕌',
+  'أذكى العقول فقط تحل هذا التحدي 🧠',
+  'تحدي سرعة: كم إجابة صح ستجمع؟ 🔥',
+  'هل تستطيع الإجابة قبل انتهاء العداد؟ ⏳',
 ];
 
 export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
@@ -139,6 +158,8 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
   const [appliedNotice, setAppliedNotice] = useState<string | null>(null);
   const [isHookVoicing, setIsHookVoicing] = useState(false);
   const [hookAudioError, setHookAudioError] = useState('');
+  const [brandKits, setBrandKits] = useState<ChannelBrandKit[]>(() => loadBrandKits());
+  const [brandKitNameInput, setBrandKitNameInput] = useState('');
   const noticeTimerRef = useRef<number | null>(null);
 
   type TemplateSectionId =
@@ -179,6 +200,9 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
     const reloadPresets = () => {
       void loadCustomPresetsAsync().then((loaded) => {
         setCustomPresets(loaded);
+      });
+      void loadBrandKitsAsync().then((kits) => {
+        setBrandKits(kits);
       });
     };
     reloadPresets();
@@ -2824,6 +2848,18 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
                 placeholder="اختبر معلوماتك الآن!"
                 className="w-full px-3 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-xs text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
               />
+              <div className="flex flex-wrap gap-1">
+                {VIRAL_HOOK_PRESETS.map((hookPreset) => (
+                  <button
+                    key={hookPreset}
+                    type="button"
+                    onClick={() => patch({ introHookText: hookPreset })}
+                    className="px-2 py-0.5 rounded-md bg-[var(--panel)] border border-[var(--pline)] hover:border-[#00B050] text-[10px] font-semibold text-[var(--pmuted)] hover:text-[var(--ptxt)] cursor-pointer"
+                  >
+                    {hookPreset}
+                  </button>
+                ))}
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <label className="flex flex-col gap-1">
                   <div className="flex justify-between text-[11px] text-[var(--pmuted)]">
@@ -3030,6 +3066,81 @@ export const TemplateDesignPanel: React.FC<TemplateDesignPanelProps> = ({
         )}
         {isSectionOpen('brand') && (
           <div className="p-3.5 border-t border-[var(--pline)] flex flex-col gap-3">
+        {/* Channel Brand Kits Manager (Quick Multi-Channel Profiles) */}
+        <div className="flex flex-col gap-2 p-3 rounded-xl bg-[var(--surface)] border border-[var(--pline)]">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-extrabold text-[var(--gold)] flex items-center gap-1.5">
+              <Crown className="w-3.5 h-3.5" />
+              <span>حزم هوية القناة (Brand Kits)</span>
+            </span>
+            <span className="text-[10px] text-[var(--pmuted)]">تبديل بضغطة واحدة</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={brandKitNameInput}
+              onChange={(e) => setBrandKitNameInput(e.target.value)}
+              placeholder="اسم القناة (مثلاً: قناة الأسئلة الدينية)..."
+              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-[11px] text-[var(--ptxt)] focus:border-[#00B050] focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                void saveBrandKitAsync(
+                  brandKitNameInput || template.brandHandleText || 'هوية قناتي',
+                  template,
+                  timing
+                ).then(({ list, created }) => {
+                  setBrandKits(list);
+                  setBrandKitNameInput('');
+                  showToast(`تم حفظ هوية "${created.name}" ✓`);
+                });
+              }}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[11px] font-bold shrink-0 cursor-pointer"
+            >
+              <BookmarkPlus className="w-3.5 h-3.5" />
+              <span>حفظ الهوية</span>
+            </button>
+          </div>
+          {brandKits.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 pt-1">
+              {brandKits.map((kit) => (
+                <div
+                  key={kit.id}
+                  className="flex items-center gap-1 pl-1 pr-2 py-1 rounded-lg bg-[var(--panel)] border border-[var(--pline)] text-[11px]"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChange(applyBrandKitToTemplate(template, kit), true);
+                      if (kit.thinkingDuration && onTimingChange && timing) {
+                        onTimingChange({ ...timing, thinkingDuration: kit.thinkingDuration });
+                      }
+                      showToast(`تم تفعيل هوية "${kit.name}" ✓`);
+                    }}
+                    className="flex items-center gap-1.5 font-bold text-[var(--ptxt)] hover:text-[#00B050] cursor-pointer"
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-full border border-white/40 shrink-0"
+                      style={{ backgroundColor: kit.questionBoxColor }}
+                    />
+                    <span>{kit.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void deleteBrandKitAsync(kit.id).then((next) => setBrandKits(next));
+                    }}
+                    title="حذف الهوية"
+                    className="p-0.5 text-[var(--pmuted)] hover:text-rose-400 cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="flex items-center gap-2">
           <input

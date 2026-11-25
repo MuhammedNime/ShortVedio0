@@ -41,6 +41,7 @@ export interface YouTubeUploadOptions {
   publishAtIso?: string;
   playlistId?: string;
   pinnedComment?: string;
+  thumbnailBlob?: Blob | null;
   onProgress?: (percent: number, stageText: string) => void;
 }
 
@@ -50,6 +51,8 @@ export interface YouTubeUploadResult {
   commentPosted: boolean;
   commentNote?: string;
   playlistAdded: boolean;
+  thumbnailApplied?: boolean;
+  thumbnailNote?: string;
 }
 
 export interface YouTubeSessionState {
@@ -536,6 +539,7 @@ export async function uploadVideoToYouTube(
     publishAtIso,
     playlistId,
     pinnedComment,
+    thumbnailBlob,
     onProgress,
   } = options;
 
@@ -636,9 +640,43 @@ export async function uploadVideoToYouTube(
     xhr.send(blob);
   });
 
+  let thumbnailApplied: boolean | undefined;
+  let thumbnailNote: string | undefined;
+  if (thumbnailBlob && thumbnailBlob.size > 0) {
+    onProgress?.(91, 'جارٍ رفع الغلاف المصغّر المخصص للفيديو...');
+    try {
+      const thumbMime = thumbnailBlob.type || 'image/jpeg';
+      const thumbRes = await fetch(
+        `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${encodeURIComponent(
+          uploadedVideoId
+        )}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': thumbMime,
+          },
+          body: thumbnailBlob,
+        }
+      );
+      if (thumbRes.ok) {
+        thumbnailApplied = true;
+      } else {
+        thumbnailApplied = false;
+        thumbnailNote =
+          thumbRes.status === 403
+            ? 'ملاحظة: يوتيوب يتطلب تأكيد رقم الهاتف في القناة لتفعيل رفع الغلاف المخصص برمجياً (أو قد تكون شورتس عمودية).'
+            : 'تعذر تعيين الغلاف المخصص على يوتيوب حالياً، ويمكنك تعيينه من YouTube Studio.';
+      }
+    } catch {
+      thumbnailApplied = false;
+      thumbnailNote = 'تم رفع الفيديو لكن تعذر إرفاق الغلاف المخصص حالياً.';
+    }
+  }
+
   let playlistAdded = false;
   if (playlistId && playlistId.trim()) {
-    onProgress?.(93, 'جارٍ إضافة الفيديو لقائمة التشغيل...');
+    onProgress?.(94, 'جارٍ إضافة الفيديو لقائمة التشغيل...');
     try {
       const plRes = await fetch(
         'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet',
@@ -673,7 +711,7 @@ export async function uploadVideoToYouTube(
       commentNote =
         'ملاحظة: يوتيوب يمنع إضافة التعليقات على الفيديوهات الخاصة/المجدولة؛ انسخ التعليق وأضفه بعد التبديل لعلني أو غير مدرج.';
     } else {
-      onProgress?.(96, 'جارٍ نشر التعليق التفاعلي تحت الفيديو...');
+      onProgress?.(97, 'جارٍ نشر التعليق التفاعلي تحت الفيديو...');
       try {
         const cmRes = await fetch(
           'https://www.googleapis.com/youtube/v3/commentThreads?part=snippet',
@@ -717,5 +755,7 @@ export async function uploadVideoToYouTube(
     commentPosted,
     commentNote,
     playlistAdded,
+    thumbnailApplied,
+    thumbnailNote,
   };
 }

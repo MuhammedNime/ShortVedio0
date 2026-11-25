@@ -34,7 +34,9 @@ import {
   generateSlideVoiceoverSafe,
 } from '../services/aiClient';
 import {
+  CloudSyncMeta,
   deleteCloudBankQuestion,
+  getCloudSyncMeta,
   pushBankQuestionsToCloud,
   signInWithGoogleForSync,
   signOutFirebaseUser,
@@ -60,6 +62,7 @@ import {
   getBankQuestions,
   getBankStats,
   markBankQuestionsUsed,
+  seedAllStarterBanksIfNeeded,
 } from '../storage/questionBankVault';
 import { QUIZ_CATEGORIES, QuestionSlide, QuizCategory } from '../types/quiz';
 import { isAndroidNativeApp, saveOrDownloadBlob } from '../utils/nativeDownload';
@@ -76,7 +79,7 @@ interface AiGeneratorPanelProps {
     mode: 'append' | 'replace',
     enableAutoSync: boolean,
     warningMessage?: string,
-    applyMathTheme?: boolean
+    themePreset?: boolean | 'math' | 'islamic'
   ) => void;
 }
 
@@ -194,6 +197,7 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
     'general' | 'math' | 'trueFalse' | 'clues' | 'versus'
   >('general');
   const [autoApplyMathTheme, setAutoApplyMathTheme] = useState(true);
+  const [autoApplyIslamicTheme, setAutoApplyIslamicTheme] = useState(true);
   const [topic, setTopic] = useState('');
   const [count, setCount] = useState(2);
   const [difficulty, setDifficulty] = useState('متوسط');
@@ -231,8 +235,23 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
   const [bankNotice, setBankNotice] = useState('');
   const [cloudUser, setCloudUser] = useState<User | null>(null);
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [cloudSyncMeta, setCloudSyncMeta] = useState<CloudSyncMeta | null>(() => getCloudSyncMeta());
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const lastSyncedUidRef = useRef<string | null>(null);
   const batchAbortRef = useRef(false);
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
 
   const selectedCategoryMeta = useMemo(
     () => QUIZ_CATEGORIES.find((c) => c.id === selectedCategory) ?? QUIZ_CATEGORIES[0],
@@ -240,6 +259,11 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
   );
 
   const refreshBank = useCallback(async () => {
+    try {
+      await seedAllStarterBanksIfNeeded(false);
+    } catch {
+      // continue reading existing bank items
+    }
     const [stats, items, folders] = await Promise.all([
       getBankStats(),
       getBankQuestions({
@@ -263,8 +287,11 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
       setCloudUser(user);
       if (user && lastSyncedUidRef.current !== user.uid) {
         lastSyncedUidRef.current = user.uid;
-        void syncQuestionBankWithCloud()
-          .then(() => refreshBank())
+        void syncQuestionBankWithCloud({ includeStarterBank: false })
+          .then(() => {
+            setCloudSyncMeta(getCloudSyncMeta());
+            return refreshBank();
+          })
           .catch(() => {});
       } else if (!user) {
         lastSyncedUidRef.current = null;
@@ -272,17 +299,22 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
     });
   }, [refreshBank]);
 
-  const handleCloudSyncNow = async () => {
+  const handleCloudSyncNow = async (includeStarterBank = false) => {
     if (isCloudSyncing) return;
     setIsCloudSyncing(true);
     setBankNotice('');
     try {
       const targetUser = cloudUser ?? (await signInWithGoogleForSync());
       if (!targetUser) return;
-      const syncRes = await syncQuestionBankWithCloud();
+      const syncRes = await syncQuestionBankWithCloud({ includeStarterBank });
+      setCloudSyncMeta(getCloudSyncMeta());
       await refreshBank();
       setBankNotice(
-        `تمت المزامنة مع Firebase (${targetUser.email || 'حسابك'}): استُرجع ${syncRes.pulled} سؤالاً ورُفع ${syncRes.pushed} سؤالاً.`
+        `تمت المزامنة مع Firebase (${targetUser.email || 'حسابك'}): استُرجع ${syncRes.pulled} سؤالاً ورُفع ${syncRes.pushed} سؤالاً${
+          syncRes.skippedStarterCount > 0
+            ? ` (تم توفير حصة السحابة بتخطي ${syncRes.skippedStarterCount} سؤالاً مدمجاً غير معدّل)`
+            : ''
+        }.`
       );
     } catch (err) {
       setBankNotice(
@@ -356,6 +388,12 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
       void refreshBank();
 
       const shouldApplyMath = (contentType === 'math' || selectedCategory === 'math') && autoApplyMathTheme;
+      const shouldApplyIslamic = selectedCategory === 'islamic' && autoApplyIslamicTheme;
+      const themePreset: 'math' | 'islamic' | false = shouldApplyMath
+        ? 'math'
+        : shouldApplyIslamic
+          ? 'islamic'
+          : false;
 
       if (withVoice) {
         const resultSlides: QuestionSlide[] = [];
@@ -381,9 +419,9 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
           }
         }
 
-        onInsertSlides(resultSlides, insertMode, true, quotaWarning, shouldApplyMath);
+        onInsertSlides(resultSlides, insertMode, true, quotaWarning, themePreset);
       } else {
-        onInsertSlides(slides, insertMode, false, undefined, shouldApplyMath);
+        onInsertSlides(slides, insertMode, false, undefined, themePreset);
       }
 
       setStatusText('');
@@ -569,12 +607,18 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
 
       await markBankQuestionsUsed([item.id], true);
       if (cloudUser) {
-        void updateCloudBankQuestionUsed(item.id, true).catch(() => {});
+        void updateCloudBankQuestionUsed(item.id, true, item).catch(() => {});
       }
       await refreshBank();
 
       const shouldApplyMath = item.category === 'math' && autoApplyMathTheme;
-      onInsertSlides([slide], insertMode, withVoice, warningMsg, shouldApplyMath);
+      const shouldApplyIslamic = item.category === 'islamic' && autoApplyIslamicTheme;
+      const themePreset: 'math' | 'islamic' | false = shouldApplyMath
+        ? 'math'
+        : shouldApplyIslamic
+          ? 'islamic'
+          : false;
+      onInsertSlides([slide], insertMode, withVoice, warningMsg, themePreset);
     } finally {
       setBankActionId(null);
     }
@@ -791,6 +835,19 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
             </span>
           </label>
         )}
+        {selectedCategory === 'islamic' && contentType !== 'math' && (
+          <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#00B050]/10 border border-[#00B050]/35 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoApplyIslamicTheme}
+              onChange={(e) => setAutoApplyIslamicTheme(e.target.checked)}
+              className="w-4 h-4 accent-[#00B050] rounded cursor-pointer"
+            />
+            <span className="text-[11px] font-bold text-[#00B050] dark:text-[#6ee7b7]">
+              تطبيق القالب الإسلامي الذهبي تلقائياً لأسئلة الإسلاميات 🌙
+            </span>
+          </label>
+        )}
       </div>
 
       {/* ================= SUB-TAB 1: DIRECT GENERATION ================= */}
@@ -906,13 +963,13 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
       {subTab === 'bank' && (
         <div className="flex flex-col gap-3.5">
           {/* Cloud Firebase Sync Card */}
-          <div className="p-2.5 rounded-xl bg-[var(--surface)] border border-[var(--pline)] flex flex-col gap-2">
+          <div className="p-2.5 rounded-xl bg-[var(--surface)] border border-[var(--pline)] flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 min-w-0">
                 <Cloud className={`w-4 h-4 shrink-0 ${cloudUser ? 'text-[#00B050]' : 'text-[var(--pmuted)]'}`} />
                 <span className="text-[11px] font-bold text-[var(--ptxt)] truncate">
                   {cloudUser
-                    ? `سحابة Firebase متصلة (${cloudUser.email || 'حسابك'})`
+                    ? `سحابة Firebase (${cloudUser.email || 'حسابك'})`
                     : 'مزامنة الذاكرة سحابياً (Firebase)'}
                 </span>
               </div>
@@ -920,8 +977,8 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                 <div className="flex items-center gap-1 shrink-0">
                   <button
                     type="button"
-                    disabled={isCloudSyncing}
-                    onClick={() => void handleCloudSyncNow()}
+                    disabled={isCloudSyncing || !isOnline}
+                    onClick={() => void handleCloudSyncNow(false)}
                     className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[10px] font-bold disabled:opacity-50 cursor-pointer"
                   >
                     <RefreshCw className={`w-3 h-3 ${isCloudSyncing ? 'animate-spin' : ''}`} />
@@ -948,8 +1005,8 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
               ) : (
                 <button
                   type="button"
-                  disabled={isCloudSyncing}
-                  onClick={() => void handleCloudSyncNow()}
+                  disabled={isCloudSyncing || !isOnline}
+                  onClick={() => void handleCloudSyncNow(false)}
                   className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#00B050] hover:bg-[#00c85b] text-white text-[10px] font-bold disabled:opacity-50 cursor-pointer shrink-0"
                 >
                   {isCloudSyncing ? (
@@ -958,6 +1015,33 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                     <Cloud className="w-3 h-3" />
                   )}
                   <span>ربط بحساب Google</span>
+                </button>
+              )}
+            </div>
+            <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--pmuted)]">
+              <span className="flex items-center gap-1">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    !isOnline ? 'bg-amber-400' : cloudUser ? 'bg-[#00B050]' : 'bg-[var(--pmuted)]'
+                  }`}
+                />
+                {!isOnline
+                  ? 'وضع أوفلاين (الحفظ محلي الآن)'
+                  : cloudSyncMeta
+                    ? `آخر مزامنة: ${new Date(cloudSyncMeta.lastSyncedAt).toLocaleTimeString('ar-EG', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}`
+                    : 'الأسئلة المخصصة والمنفذة تُزامَن تلقائياً لحفظ الحصة'}
+              </span>
+              {cloudUser && isOnline && (
+                <button
+                  type="button"
+                  disabled={isCloudSyncing}
+                  onClick={() => void handleCloudSyncNow(true)}
+                  className="text-[10px] font-bold text-[#00B050] hover:underline cursor-pointer disabled:opacity-50"
+                >
+                  نسخ كل البنك
                 </button>
               )}
             </div>
@@ -1392,7 +1476,7 @@ export const AiGeneratorPanel: React.FC<AiGeneratorPanelProps> = ({
                           const nextUsed = !item.usedInVideo;
                           void markBankQuestionsUsed([item.id], nextUsed).then(() => {
                             if (cloudUser) {
-                              void updateCloudBankQuestionUsed(item.id, nextUsed).catch(() => {});
+                              void updateCloudBankQuestionUsed(item.id, nextUsed, item).catch(() => {});
                             }
                             return refreshBank();
                           });
